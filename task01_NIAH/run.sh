@@ -1,0 +1,3 @@
+python task01_report_AGI_PK.py
+python task01_report_AGI.py
+python task01_report.py
