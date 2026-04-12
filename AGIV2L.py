@@ -15,10 +15,11 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        # 強制在 float32 計算方差，避免混合精度 (bf16) 訓練下的數值溢位
+        # 強制在 float32 計算，確保運算過程不溢位且保留精度
         norm_x = x.to(torch.float32)
         norm = torch.rsqrt(norm_x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return (x * norm.to(x.dtype)) * self.weight
+        # 修正：在 float32 空間完成相乘後再轉換回 bf16/fp16
+        return ((norm_x * norm).to(x.dtype)) * self.weight
 
 class SwiGLUFFN(nn.Module):
     """LLaMA-4 知識庫的物理載體"""
@@ -35,6 +36,7 @@ class SwiGLUFFN(nn.Module):
 def apply_rope(x, head_dim):
     """
     局部旋轉位置編碼 (只作用於 D_head)
+    注意：此處依原設計實作「窗口內相對位置」，即每個 C_len 獨立從 0 開始編碼。
     x shape: (B, N, num_heads, C_len, head_dim)
     """
     B, N, num_heads, C_len, _ = x.shape
@@ -60,6 +62,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     if n_rep == 1:
         return hidden_states
     hidden_states = hidden_states[:, :, :, None, :, :].expand(B, N, num_kv_heads, n_rep, seq_len, head_dim)
+    # 使用 reshape 確保安全
     return hidden_states.reshape(B, N, num_kv_heads * n_rep, seq_len, head_dim)
 
 # ==========================================
@@ -94,7 +97,6 @@ class AGIV2LocalBlock(nn.Module):
     def forward(self, X, shift_size=0):
         B, L, D = X.shape
         device = X.device
-        dtype = X.dtype
         
         # Pre-Norm
         normed_X = self.norm1(X)
@@ -105,21 +107,21 @@ class AGIV2LocalBlock(nn.Module):
         L_pad = L + pad_len
         N = L_pad // self.C
         
-        # 平移與布林遮罩 (適用於 SDPA: True=參與計算, False=遮蔽)
+        # 平移與布林遮罩
         if shift_size > 0:
             Z_shifted = torch.roll(Z, shifts=-shift_size, dims=1)
             region_idx = torch.zeros(L_pad, device=device)
             region_idx[-shift_size:] = 1 
             mask_windows = region_idx.view(1, N, 1, self.C, 1)
-            # 只有相同 region 的 token 允許產生 Attention
             sdpa_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
         else:
             Z_shifted = Z
             sdpa_mask = None
             
-        Z_chunked = Z_shifted.view(B, N, self.C, D)
+        # 修正：使用 reshape 吸收 torch.roll 帶來的不連續性
+        Z_chunked = Z_shifted.reshape(B, N, self.C, D)
         
-        # GQA 投影與形狀轉換為 [B, N, num_heads, C, head_dim]
+        # GQA 投影與形狀轉換 (W投影後連續，可用view)
         Q_loc = self.W_q_loc(Z_chunked).view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
         K_loc = self.W_k_loc(Z_chunked).view(B, N, self.C, self.num_kv_heads, self.head_dim).transpose(2, 3)
         V_loc = self.W_v_loc(Z_chunked).view(B, N, self.C, self.num_kv_heads, self.head_dim).transpose(2, 3)
@@ -130,7 +132,7 @@ class AGIV2LocalBlock(nn.Module):
         K_loc = repeat_kv(K_loc, self.num_key_value_groups)
         V_loc = repeat_kv(V_loc, self.num_key_value_groups)
         
-        # [SOTA 升級] 自動觸發 FlashAttention-2，內建 sqrt(head_dim) 縮放
+        # 備註：若傳入 sdpa_mask，會自動降級為 Math Backend 以確保數學正確性
         Z_hat_chunked = F.scaled_dot_product_attention(
             Q_loc, K_loc, V_loc, 
             attn_mask=sdpa_mask, 
@@ -138,10 +140,11 @@ class AGIV2LocalBlock(nn.Module):
             is_causal=False
         )
         
-        Z_hat_chunked = Z_hat_chunked.transpose(2, 3).contiguous().view(B, N, self.C, D)
+        # 修正：transpose 後重塑為 4D
+        Z_hat_chunked = Z_hat_chunked.transpose(2, 3).reshape(B, N, self.C, D)
         Z_hat_chunked = self.o_proj_loc(Z_hat_chunked)
         
-        Z_hat_shifted = Z_hat_chunked.view(B, L_pad, D)
+        Z_hat_shifted = Z_hat_chunked.reshape(B, L_pad, D)
         Z_hat = torch.roll(Z_hat_shifted, shifts=shift_size, dims=1) if shift_size > 0 else Z_hat_shifted
         
         if pad_len > 0:
@@ -230,12 +233,12 @@ class AGIV2GlobalBlock(nn.Module):
         # ===== Phase II & Phase III 共用 Pre-Norm =====
         normed_X2 = self.norm2(X_res1)
         
-        # [Phase II] 潛在記憶池 (升級為 SDPA 計算)
+        # [Phase II] 潛在記憶池
+        # 警告觀測：此處的 SDPA head_dim = D = 4096，將觸發 PyTorch Math Backend。
         K_mem = self.W_k_mem(normed_X2) 
         V_mem = self.W_v_mem(normed_X2) 
         Q_mem_b = self.Q_mem.unsqueeze(0).expand(B, -1, -1) 
         
-        # 轉換形狀為 SDPA 支援的 [B, 1, seq_len, D]
         M_global = F.scaled_dot_product_attention(
             Q_mem_b.unsqueeze(1), 
             K_mem.unsqueeze(1), 
@@ -260,7 +263,8 @@ class AGIV2GlobalBlock(nn.Module):
             Z_shifted = Z
             sdpa_mask = None
             
-        Z_chunked = Z_shifted.view(B, N, self.C, D) 
+        # 修正：使用 reshape 處理可能的不連續性
+        Z_chunked = Z_shifted.reshape(B, N, self.C, D) 
         
         Q_loc = self.W_q_loc(Z_chunked).view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
         K_loc = self.W_k_loc(Z_chunked).view(B, N, self.C, self.num_kv_heads, self.head_dim).transpose(2, 3)
@@ -272,7 +276,6 @@ class AGIV2GlobalBlock(nn.Module):
         K_loc = repeat_kv(K_loc, self.num_key_value_groups)
         V_loc = repeat_kv(V_loc, self.num_key_value_groups)
         
-        # SDPA Local
         Z_hat_chunked = F.scaled_dot_product_attention(
             Q_loc, K_loc, V_loc, 
             attn_mask=sdpa_mask, 
@@ -280,10 +283,11 @@ class AGIV2GlobalBlock(nn.Module):
             is_causal=False
         )
         
-        Z_hat_chunked = Z_hat_chunked.transpose(2, 3).contiguous().view(B, N, self.C, D)
+        # 修正：transpose 後的重塑
+        Z_hat_chunked = Z_hat_chunked.transpose(2, 3).reshape(B, N, self.C, D)
         Z_hat_chunked = self.o_proj_loc(Z_hat_chunked)
         
-        Z_hat_shifted = Z_hat_chunked.view(B, L_pad, D)
+        Z_hat_shifted = Z_hat_chunked.reshape(B, L_pad, D)
         Z_hat = torch.roll(Z_hat_shifted, shifts=shift_size, dims=1) if shift_size > 0 else Z_hat_shifted
         
         # [Phase III] Cross 全局檢索路由
@@ -294,14 +298,14 @@ class AGIV2GlobalBlock(nn.Module):
         K_cross = repeat_kv(K_cross.unsqueeze(1), self.num_key_value_groups).squeeze(1)
         V_cross = repeat_kv(V_cross.unsqueeze(1), self.num_key_value_groups).squeeze(1)
         
-        # SDPA Cross
         I_cross = F.scaled_dot_product_attention(
             Q_cross, K_cross, V_cross, 
             dropout_p=0.0, 
             is_causal=False
         )
         
-        I_cross = I_cross.transpose(1, 2).contiguous().view(B, L_pad, D)
+        # 修正：安全重塑回 [B, L_pad, D]
+        I_cross = I_cross.transpose(1, 2).reshape(B, L_pad, D)
         I_cross = self.o_proj_cross(I_cross)
         
         if pad_len > 0:
@@ -329,9 +333,7 @@ class AGIV2L(nn.Module):
         self.embedding = nn.Embedding(vocab_size, D)
         self.blocks = nn.ModuleList()
         
-        # 1:3 稀疏架構裝配
         for i in range(num_blocks):
-            # 每 4 層的最後 1 層 (即 index 3, 7, 11...) 配置為 Global Block
             if (i + 1) % 4 == 0:
                 self.blocks.append(
                     AGIV2GlobalBlock(D=D, hidden_dim=hidden_dim, K=K, M=M, C=C)
@@ -347,7 +349,6 @@ class AGIV2L(nn.Module):
     def forward(self, x):
         out = self.embedding(x)
         for i, block in enumerate(self.blocks):
-            # 奇數層賦予平移，確保空間資訊流動
             shift_size = (block.C // 2) if (i % 2 != 0) else 0
             out = block(out, shift_size=shift_size)
         out = self.final_norm(out)
