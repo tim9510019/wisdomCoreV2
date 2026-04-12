@@ -34,22 +34,27 @@ class SwiGLUFFN(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 def apply_rope(x, head_dim):
-    """局部旋轉位置編碼 (只作用於 D_head)"""
+    """
+    局部旋轉位置編碼 (對齊 Hugging Face Llama-3 的 Half-and-Half 物理實作)
+    """
     B, N, num_heads, C_len, _ = x.shape
+    # 保持 float32 進行高精度座標計算
     position = torch.arange(C_len, device=x.device).unsqueeze(1).float()
     div_term = torch.exp(torch.arange(0, head_dim, 2, device=x.device).float() * -(math.log(500000.0) / head_dim))
     freqs = position * div_term 
     
-    freqs = freqs.unsqueeze(0).unsqueeze(0).unsqueeze(0) 
-    sin_val = torch.sin(freqs)
-    cos_val = torch.cos(freqs)
+    emb = torch.cat((freqs, freqs), dim=-1) 
+    emb = emb.unsqueeze(0).unsqueeze(0).unsqueeze(0) 
     
-    x1 = x[..., 0::2]
-    x2 = x[..., 1::2]
-    x_rot = torch.empty_like(x)
-    x_rot[..., 0::2] = x1 * cos_val - x2 * sin_val
-    x_rot[..., 1::2] = x1 * sin_val + x2 * cos_val
-    return x_rot
+    # 🚀 關鍵修復：計算完 sin/cos 後，強制轉型回輸入向量的型態 (bfloat16)
+    sin_val = torch.sin(emb).to(x.dtype)
+    cos_val = torch.cos(emb).to(x.dtype)
+    
+    x1 = x[..., : head_dim // 2]
+    x2 = x[..., head_dim // 2 :]
+    x_rotated = torch.cat((-x2, x1), dim=-1)
+    
+    return (x * cos_val) + (x_rotated * sin_val)
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """GQA 擴展函數"""
@@ -94,15 +99,22 @@ class AGIV2LocalBlock(nn.Module):
         L_pad = L + pad_len
         N = L_pad // self.C
         
+        # 🚀 因果律修復：建立基礎的 Chunk 級別因果遮罩 (下三角矩陣)
+        causal_mask = torch.tril(torch.ones(self.C, self.C, dtype=torch.bool, device=device))
+        
         if shift_size > 0:
             Z_shifted = torch.roll(Z, shifts=-shift_size, dims=1)
             region_idx = torch.zeros(L_pad, device=device)
             region_idx[-shift_size:] = 1 
             mask_windows = region_idx.view(1, N, 1, self.C, 1)
-            sdpa_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
+            # 原始的區塊邊界遮罩
+            block_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
+            # 🚀 聯集因果遮罩
+            sdpa_mask = block_mask & causal_mask.view(1, 1, 1, self.C, self.C)
         else:
             Z_shifted = Z
-            sdpa_mask = None
+            # 🚀 套用因果遮罩
+            sdpa_mask = causal_mask.view(1, 1, 1, self.C, self.C)
             
         Z_chunked = Z_shifted.reshape(B, N, self.C, D)
         
@@ -228,15 +240,21 @@ class AGIV2GlobalBlock(nn.Module):
         L_pad = L + pad_len
         N = L_pad // self.C
         
+        # 🚀 因果律修復：建立基礎的 Chunk 級別因果遮罩 (下三角矩陣)
+        causal_mask = torch.tril(torch.ones(self.C, self.C, dtype=torch.bool, device=device))
+
         if shift_size > 0:
             Z_shifted = torch.roll(Z, shifts=-shift_size, dims=1)
             region_idx = torch.zeros(L_pad, device=device)
             region_idx[-shift_size:] = 1 
             mask_windows = region_idx.view(1, N, 1, self.C, 1)
-            sdpa_mask = (mask_windows == mask_windows.transpose(-1, -2))
+            block_mask = (mask_windows == mask_windows.transpose(-1, -2))
+            # 🚀 聯集因果遮罩
+            sdpa_mask = block_mask & causal_mask.view(1, 1, 1, self.C, self.C)
         else:
             Z_shifted = Z
-            sdpa_mask = None
+            # 🚀 套用因果遮罩
+            sdpa_mask = causal_mask.view(1, 1, 1, self.C, self.C)
             
         Z_chunked = Z_shifted.reshape(B, N, self.C, D) 
         
