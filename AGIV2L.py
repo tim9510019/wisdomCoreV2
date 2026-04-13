@@ -228,9 +228,9 @@ class AGIV2GlobalBlock(nn.Module):
 
         # # 3. 重新封裝回頻域進行逆變換
         # Y_f = torch.complex(Yr, Yi)
-        
+
         Y_sys1 = torch.fft.irfft(Y_f, n=2*L, dim=1).to(dtype)
-        Y_sys1 = Y_sys1_pad[:, :L, :] 
+        Y_sys1 = Y_sys1[:, :L, :] 
         
         # 🚀 應用 Zero-Gating：初始階段完全關閉 Phase I 影響
         X_res1 = X + (Y_sys1 * self.gate_fft.to(dtype))
