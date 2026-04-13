@@ -13,10 +13,12 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer, TrainerCallback, set_seed
+from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_dataset, interleave_datasets
 import math
 import csv
 import time
+import shutil
 
 from AGIV2L import AGIV2L
 
@@ -53,7 +55,6 @@ class AGIV2LForCausalLM(nn.Module):
             shift_hidden = hidden_states[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             
-            # 加入 ignore_index 防禦機制，為未來 SFT 階段鋪路
             loss_fct = nn.CrossEntropyLoss(reduction="sum", ignore_index=-100)
             total_loss = 0.0
             valid_tokens = 0.0 
@@ -90,18 +91,15 @@ def transplant_and_freeze(model_id, agiv2_base):
     src_sd = src_model.state_dict()
     new_sd = {}
 
-    # 基礎權重映射
     new_sd['embedding.weight'] = src_sd.get('model.embed_tokens.weight')
     new_sd['fc_out.weight'] = src_sd.get('lm_head.weight')
     new_sd['final_norm.weight'] = src_sd.get('model.norm.weight')
 
-    # 32層權重映射
     for i in range(32):
         s_pre = f"model.layers.{i}."
         a_pre = f"blocks.{i}."
         is_global = (i + 1) % 4 == 0
         
-        # Norm 映射
         if is_global:
             new_sd[f"{a_pre}norm2.weight"] = src_sd.get(f"{s_pre}input_layernorm.weight")
             new_sd[f"{a_pre}norm3.weight"] = src_sd.get(f"{s_pre}post_attention_layernorm.weight")
@@ -109,18 +107,15 @@ def transplant_and_freeze(model_id, agiv2_base):
             new_sd[f"{a_pre}norm1.weight"] = src_sd.get(f"{s_pre}input_layernorm.weight")
             new_sd[f"{a_pre}norm2.weight"] = src_sd.get(f"{s_pre}post_attention_layernorm.weight")
             
-        # FFN 映射
         new_sd[f"{a_pre}ffn.gate_proj.weight"] = src_sd.get(f"{s_pre}mlp.gate_proj.weight")
         new_sd[f"{a_pre}ffn.up_proj.weight"] = src_sd.get(f"{s_pre}mlp.up_proj.weight")
         new_sd[f"{a_pre}ffn.down_proj.weight"] = src_sd.get(f"{s_pre}mlp.down_proj.weight")
 
-        # Local Attention 映射 (核心修復：確保 Llama-3 的語義解析能力被正確繼承)
         new_sd[f"{a_pre}W_q_loc.weight"] = src_sd.get(f"{s_pre}self_attn.q_proj.weight")
         new_sd[f"{a_pre}W_k_loc.weight"] = src_sd.get(f"{s_pre}self_attn.k_proj.weight")
         new_sd[f"{a_pre}W_v_loc.weight"] = src_sd.get(f"{s_pre}self_attn.v_proj.weight")
         new_sd[f"{a_pre}o_proj_loc.weight"] = src_sd.get(f"{s_pre}self_attn.o_proj.weight")
 
-    # 載入並凍結
     new_sd = {k: v for k, v in new_sd.items() if v is not None}
     agiv2_base.load_state_dict(new_sd, strict=False)
     
@@ -141,36 +136,34 @@ def transplant_and_freeze(model_id, agiv2_base):
     return agiv2_base
 
 class AGIV2LMonitor(TrainerCallback):
-    """
-    負責即時紀錄 Loss 與 Zero-Gating 的動態上升曲線
-    """
-    def __init__(self, path="./agiv2_cpt_log.csv"):
+    def __init__(self, path="./agiv2_cpt_log.csv", save_dir="./agiv2-cpt"):
         self.path = path
-        # 標頭新增 gate_fft 與 gate_mem
-        with open(self.path, 'w', newline='') as f:
-            csv.writer(f).writerow(['step', 'train_loss', 'eval_loss', 'lr', 'gate_fft', 'gate_mem', 'time'])
+        self.save_dir = save_dir
+        self.best_eval_loss = float('inf')
+        
+        os.makedirs(self.save_dir, exist_ok=True)
+        
+        if not os.path.exists(self.path):
+            with open(self.path, 'w', newline='') as f:
+                csv.writer(f).writerow(['step', 'train_loss', 'eval_loss', 'lr', 'gate_fft', 'gate_mem', 'time'])
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if logs:
             model = kwargs.get('model', None)
             avg_gate_fft, avg_gate_mem = 0.0, 0.0
             
-            # 穿透網路結構，提取所有 Global Block 的閘控參數
             if model is not None:
                 core_model = model.base_model if hasattr(model, 'base_model') else model
                 gate_fft_vals, gate_mem_vals = [], []
                 
                 for block in core_model.blocks:
                     if hasattr(block, 'gate_fft'):
-                        # 轉換為 float 以便記錄
                         gate_fft_vals.append(block.gate_fft.item())
                         gate_mem_vals.append(block.gate_mem.item())
                 
                 if gate_fft_vals:
                     avg_gate_fft = sum(gate_fft_vals) / len(gate_fft_vals)
                     avg_gate_mem = sum(gate_mem_vals) / len(gate_mem_vals)
-                    
-                    # 巧思：動態注入到 HF 的 logs 字典，讓它直接顯示在終端機畫面上
                     logs["gate_fft"] = round(avg_gate_fft, 6)
                     logs["gate_mem"] = round(avg_gate_mem, 6)
 
@@ -180,10 +173,22 @@ class AGIV2LMonitor(TrainerCallback):
                     logs.get("loss", ""), 
                     logs.get("eval_loss", ""), 
                     logs.get("learning_rate", ""), 
-                    f"{avg_gate_fft:.6f}",
-                    f"{avg_gate_mem:.6f}",
+                    f"{avg_gate_fft:.6f}" if gate_fft_vals else "",
+                    f"{avg_gate_mem:.6f}" if gate_fft_vals else "",
                     time.ctime()
                 ])
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if metrics and "eval_loss" in metrics:
+            current_eval_loss = metrics["eval_loss"]
+            if current_eval_loss < self.best_eval_loss:
+                old_best = self.best_eval_loss
+                self.best_eval_loss = current_eval_loss
+                model = kwargs.get('model', None)
+                if model is not None:
+                    best_model_path = os.path.join(self.save_dir, "best_model.pth")
+                    torch.save(model.state_dict(), best_model_path)
+                    print(f"\n[Monitor] 🌟 Eval Loss 進步 ({old_best:.4f} -> {current_eval_loss:.4f})，已淬鍊權重至 {best_model_path}")
 
 # ==========================================
 # 3. 資料集隔離 (Train: 前段, Val: 後段)
@@ -232,6 +237,9 @@ class Packed32KDataset(torch.utils.data.IterableDataset):
 
 def main():
     model_id = "NousResearch/Meta-Llama-3-8B"
+    save_dir = "./agiv2-cpt"
+    os.makedirs(save_dir, exist_ok=True)
+    
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
 
@@ -240,10 +248,10 @@ def main():
     model = AGIV2LForCausalLM(base).to(torch.bfloat16).cuda()
 
     train_ds = Packed32KDataset(tokenizer, max_length=32768, is_val=False)
-    val_ds = Packed32KDataset(tokenizer, max_length=4096, is_val=True, max_samples=20) 
+    val_ds = Packed32KDataset(tokenizer, max_length=32768, is_val=True, max_samples=20) 
 
     args = TrainingArguments(
-        output_dir="./agiv2-cpt",
+        output_dir=save_dir,
         max_steps=5000, 
         per_device_train_batch_size=1, 
         gradient_accumulation_steps=8,
@@ -252,10 +260,11 @@ def main():
         lr_scheduler_type="cosine",
         weight_decay=0.01, 
         bf16=True, 
-        logging_steps=10, 
+        logging_steps=1, 
+        save_steps=1, 
+        save_total_limit=2, 
         eval_strategy="steps", 
         eval_steps=100,
-        save_steps=500, 
         optim="paged_adamw_8bit", 
         report_to="none", 
         gradient_checkpointing=False
@@ -266,13 +275,18 @@ def main():
         args=args, 
         train_dataset=train_ds, 
         eval_dataset=val_ds, 
-        callbacks=[AGIV2LMonitor()]
+        callbacks=[AGIV2LMonitor(save_dir=save_dir)]
     )
     
-    print("🚀 開始 32K CPT 訓練 (CUDA:1)...")
-    trainer.train()
+    last_checkpoint = get_last_checkpoint(save_dir)
+    if last_checkpoint is not None:
+        print(f"\n🚀 偵測到極限中斷點 {last_checkpoint}，啟動全維度狀態無損恢復...")
+    else:
+        print("\n🚀 開始 32K CPT 全新訓練 (CUDA:1)...")
+
+    trainer.train(resume_from_checkpoint=last_checkpoint)
     
-    torch.save(model.state_dict(), "./agiv2-cpt/final.pth")
+    torch.save(model.state_dict(), os.path.join(save_dir, "final.pth"))
     print("🎉 訓練完成！")
 
 if __name__ == "__main__":
