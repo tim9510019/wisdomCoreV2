@@ -212,11 +212,24 @@ class AGIV2GlobalBlock(nn.Module):
         X_pad = F.pad(normed_X1, (0, 0, 0, L))  
         H_pad = F.pad(H, (0, 0, 0, L))  
         
+        # 1. 取得頻域特徵，並立即分解為實部與虛部 (這會得到兩個實數 Tensor)
         X_f = torch.fft.rfft(X_pad.to(torch.float32), dim=1)
-        H_f = torch.fft.rfft(H_pad.to(torch.float32), dim=0).unsqueeze(0) 
+        H_f = torch.fft.rfft(H_pad.to(torch.float32), dim=0).unsqueeze(0)
+
+        Y_f = X_f * torch.conj(H_f)
+
+        # Xr, Xi = X_f.real, X_f.imag
+        # Hr, Hi = H_f.real, H_f.imag # 這裡 H_f 是共軛 H*，所以 Hi 要取反，或是直接計算
+
+        # # 2. 模擬複數共軛乘法: (Xr + iXi) * (Hr - iHi)
+        # # 透過向量組合達成，完全不涉及複數型態
+        # Yr = Xr * Hr + Xi * Hi
+        # Yi = Xi * Hr - Xr * Hi
+
+        # # 3. 重新封裝回頻域進行逆變換
+        # Y_f = torch.complex(Yr, Yi)
         
-        Y_sys1_f = X_f * torch.conj(H_f)
-        Y_sys1_pad = torch.fft.irfft(Y_sys1_f, n=2*L, dim=1).to(dtype)
+        Y_sys1 = torch.fft.irfft(Y_f, n=2*L, dim=1).to(dtype)
         Y_sys1 = Y_sys1_pad[:, :L, :] 
         
         # 🚀 應用 Zero-Gating：初始階段完全關閉 Phase I 影響
