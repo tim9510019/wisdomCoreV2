@@ -196,8 +196,8 @@ class AGIV2LMonitor(TrainerCallback):
 
 class Packed32KDataset(torch.utils.data.IterableDataset):
     def __init__(self, tokenizer, max_length=32768, is_val=False, max_samples=None):
-        ds_edu = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
-        ds_cos = load_dataset("HuggingFaceTB/cosmopedia", name="stanford", split="train", streaming=True)
+        ds_edu = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=False)
+        ds_cos = load_dataset("HuggingFaceTB/cosmopedia", name="stanford", split="train", streaming=False)
         
         if is_val:
             ds_edu, ds_cos = ds_edu.skip(100000), ds_cos.skip(10000)
@@ -254,6 +254,7 @@ def main():
         output_dir=save_dir,
         max_steps=5000, 
         per_device_train_batch_size=1, 
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
         learning_rate=1e-4, 
         warmup_ratio=0.05, 

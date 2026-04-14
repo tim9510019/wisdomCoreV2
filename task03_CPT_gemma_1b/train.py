@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ==========================================
 # 0. SOTA 環境配置 (必須在 import torch 之前)
 # ==========================================
+# 完全對齊 train.py: 使用設備 "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -199,8 +200,8 @@ class AGIV2GMonitor(TrainerCallback):
 
 class Packed32KDataset(torch.utils.data.IterableDataset):
     def __init__(self, tokenizer, max_length=32768, is_val=False, max_samples=None):
-        ds_edu = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
-        ds_cos = load_dataset("HuggingFaceTB/cosmopedia", name="stanford", split="train", streaming=True)
+        ds_edu = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=False)
+        ds_cos = load_dataset("HuggingFaceTB/cosmopedia", name="stanford", split="train", streaming=False)
         
         if is_val:
             ds_edu, ds_cos = ds_edu.skip(100000), ds_cos.skip(10000)
