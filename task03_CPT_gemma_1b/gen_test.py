@@ -2,30 +2,45 @@ import os
 import torch
 from transformers import AutoTokenizer
 
-# 強制使用與訓練相同的環境變數
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# 關閉 bitsandbytes 煩人的歡迎訊息
 os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 
-from train import AGIV2LForCausalLM, transplant_and_freeze
-from AGIV2L import AGIV2L
+# ⚠️ 注意：請確保 train.py 裡面的 transplant_and_freeze 函數：
+# (1) 迴圈已改為 for i in range(26):
+# (2) 載入精度 dtype 已改為 torch.float16
+from train import AGIV2GForCausalLM, transplant_and_freeze
+from AGIV2G import AGIV2G
 
 def test_generation():
-    model_id = "NousResearch/Meta-Llama-3-8B"
+    # 🚀 動態設備偵測：自動判斷硬體環境並進行指派
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print("=" * 50)
+    print(f"🖥️ 當前掛載運算設備: {device}")
+    print("=" * 50)
+
+    model_id = "google/gemma-3-1b-it"
     
     print("⏳ [1/3] 載入 Tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token is None: 
+        tokenizer.pad_token = tokenizer.eos_token
 
-    print("⏳ [2/3] 初始化 AGIV2L 模型並掛載 Llama-3 權重...")
-    base = AGIV2L(vocab_size=len(tokenizer), D=4096, hidden_dim=14336, num_blocks=32)
+    print(f"⏳ [2/3] 初始化 AGIV2G 模型並掛載 {model_id} 權重...")
+    # 鎖死物理詞表大小為 262144
+    base = AGIV2G(vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26)
+    
+    # 進行權重移植與凍結
     base = transplant_and_freeze(model_id, base)
     
-    model = AGIV2LForCausalLM(base).to(torch.bfloat16).cuda()
-    model.eval() # 關閉 Dropout，確保生成穩定
+    # 🚀 將模型精準推送至目標設備 (GPU 或 CPU)
+    model = AGIV2GForCausalLM(base).to(torch.float16).to(device)
+    model.eval() # 關閉 Dropout，並確保 Zero-Gating 處於純粹的 0 狀態
 
     # 測試提示詞 (Prompt)
     prompt = "The capital of France is Paris. The capital of Japan is"
-    input_ids = tokenizer(prompt, return_tensors="pt")["input_ids"].cuda()
+    
+    # 🚀 將輸入張量推送至目標設備
+    input_ids = tokenizer(prompt, return_tensors="pt")["input_ids"].to(device)
 
     print(f"\n⏳ [3/3] 開始生成 (Prompt: '{prompt}')...")
     print("-" * 50)
