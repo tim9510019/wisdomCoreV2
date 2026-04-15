@@ -204,9 +204,11 @@ class Packed32KDataset(torch.utils.data.IterableDataset):
         ds_cos = load_dataset("HuggingFaceTB/cosmopedia", name="stanford", split="train", streaming=False)
         
         if is_val:
-            ds_edu, ds_cos = ds_edu.skip(100000), ds_cos.skip(10000)
+            # 驗證集：只拿前面的 1000 筆跟 500 筆資料就足夠評估了
+            ds_edu, ds_cos = ds_edu.take(1000), ds_cos.take(500)
         else:
-            ds_edu, ds_cos = ds_edu.take(100000), ds_cos.take(10000)
+            # 訓練集：跳過前面給驗證集用掉的資料後，剩餘的「無限供應」，不設 .take() 上限！
+            ds_edu, ds_cos = ds_edu.skip(1000), ds_cos.skip(500)
 
         self.dataset = interleave_datasets([ds_edu, ds_cos], probabilities=[0.6, 0.4])
         self.tokenizer = tokenizer
