@@ -309,19 +309,17 @@ class AGIV2GlobalBlock(nn.Module):
         
         Q_cross = self.W_q_cross(Z_hat_chunks)  # [B, N, C, nh*hd]
         Q_cross = Q_cross.view(B * N, self.C, self.num_heads, self.head_dim)
+        Q_cross = Q_cross.transpose(1, 2)  # [B*N, nh, C, hd]
         
         K_cross = self.W_k_cross(M_causal)  # [B, N, M, nkv*hd]
         K_cross = K_cross.view(B * N, self.M, self.num_kv_heads, self.head_dim)
+        K_cross = K_cross.transpose(1, 2)  # [B*N, nkv, M, hd]
+        K_cross = repeat_kv(K_cross.unsqueeze(1), self.num_key_value_groups).squeeze(1)  # [B*N, nh, M, hd]
         
         V_cross = self.W_v_cross(M_causal)  # [B, N, M, nkv*hd]
         V_cross = V_cross.view(B * N, self.M, self.num_kv_heads, self.head_dim)
-        
-        K_cross = repeat_kv(K_cross, self.num_key_value_groups)
-        V_cross = repeat_kv(V_cross, self.num_key_value_groups)
-        
-        Q_cross = Q_cross.transpose(1, 2)  # [B*N, nh, C, hd]
-        K_cross = K_cross.transpose(1, 2)  # [B*N, nh, M, hd]
-        V_cross = V_cross.transpose(1, 2)
+        V_cross = V_cross.transpose(1, 2)  # [B*N, nkv, M, hd]
+        V_cross = repeat_kv(V_cross.unsqueeze(1), self.num_key_value_groups).squeeze(1)  # [B*N, nh, M, hd]
         
         I_cross = F.scaled_dot_product_attention(
             Q_cross, K_cross, V_cross, dropout_p=0.0, is_causal=False  # ✅ 合法！M_causal 裡只有過去
