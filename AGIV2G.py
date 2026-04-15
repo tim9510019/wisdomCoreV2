@@ -227,29 +227,53 @@ class AGIV2GlobalBlock(nn.Module):
         X_f = torch.fft.rfft(X_pad.to(torch.float32), dim=1)
         H_f = torch.fft.rfft(H_pad.to(torch.float32), dim=0).unsqueeze(0)
 
-        Y_f = X_f * torch.conj(H_f)
+        # Y_f = X_f * torch.conj(H_f)
+        Y_f = X_f * H_f
         Y_sys1 = torch.fft.irfft(Y_f, n=2*L, dim=1).to(dtype)[:, :L, :]
         
         X_res0 = X + (Y_sys1 * self.gate_fft.to(dtype))
         
-        # [Phase II] 記憶池分支
+        # [Phase II] 因果記憶池 (Chunk-Causal Memory via Running Mean)
         normed_X_mem = self.mem_norm(X_res0)
         
-        K_mem = self.W_k_mem(normed_X_mem) 
-        V_mem = self.W_v_mem(normed_X_mem) 
-        Q_mem_b = self.Q_mem.unsqueeze(0).expand(B, -1, -1) 
+        K_mem = self.W_k_mem(normed_X_mem)  # [B, L, D]
+        V_mem = self.W_v_mem(normed_X_mem)  # [B, L, D]
         
-        M_global = F.scaled_dot_product_attention(
-            Q_mem_b.unsqueeze(1), K_mem.unsqueeze(1), V_mem.unsqueeze(1), dropout_p=0.0, is_causal=False
-        ).squeeze(1) 
+        # Step 1: 切 Chunk 並 Padding 對齊
+        mem_pad = (self.C - L % self.C) % self.C
+        K_mem_p = F.pad(K_mem, (0, 0, 0, mem_pad)) if mem_pad > 0 else K_mem
+        V_mem_p = F.pad(V_mem, (0, 0, 0, mem_pad)) if mem_pad > 0 else V_mem
+        L_mem_pad = K_mem_p.size(1)
+        N_mem = L_mem_pad // self.C
+        
+        K_chunks = K_mem_p.view(B, N_mem, self.C, D)  # [B, N, C, D]
+        V_chunks = V_mem_p.view(B, N_mem, self.C, D)
+        
+        # Step 2: 每個 Chunk 獨立壓縮 (完全平行，GPU 單次 Kernel)
+        Q_exp = self.Q_mem.view(1, 1, self.M, D).expand(B, N_mem, -1, -1)  # [B, N, M, D]
+        updates = F.scaled_dot_product_attention(
+            Q_exp.reshape(B * N_mem, 1, self.M, D),
+            K_chunks.reshape(B * N_mem, 1, self.C, D),
+            V_chunks.reshape(B * N_mem, 1, self.C, D),
+            dropout_p=0.0, is_causal=False
+        ).reshape(B, N_mem, self.M, D)  # [B, N, M, D]
+        
+        # Step 3: Causal Running Mean (嚴格因果，零新增參數)
+        M_cumsum = torch.cumsum(updates, dim=1)  # [B, N, M, D]
+        counts = torch.arange(1, N_mem + 1, device=device, dtype=dtype).view(1, -1, 1, 1)
+        M_all = M_cumsum / counts  # Running Mean
+        
+        # Step 4: Shift by 1 保證嚴格因果 (Chunk n 只能看 Chunk 0~n-1)
+        M_causal = torch.roll(M_all, shifts=1, dims=1)  # [B, N, M, D]
+        M_causal[:, 0] = 0  # Chunk 0 沒有歷史記憶
         
         # [Phase III] Local + Cross 注意力
         normed_X_loc = self.input_layernorm(X_res0)
         
-        pad_len = (self.C - L % self.C) % self.C
+        pad_len = mem_pad  # 複用 Phase II 的 Padding (保證 N 一致)
         Z = F.pad(normed_X_loc, (0, 0, 0, pad_len)) if pad_len > 0 else normed_X_loc
-        L_pad = L + pad_len
-        N = L_pad // self.C
+        L_pad = L_mem_pad
+        N = N_mem
         
         Q_loc = self.W_q_loc(Z).view(B, L_pad, self.num_heads, self.head_dim)
         K_loc = self.W_k_loc(Z).view(B, L_pad, self.num_kv_heads, self.head_dim)
@@ -300,23 +324,31 @@ class AGIV2GlobalBlock(nn.Module):
         Z_hat_shifted = self.o_proj_loc(Z_hat_chunked)
         Z_hat = torch.roll(Z_hat_shifted, shifts=shift_size, dims=1) if shift_size > 0 else Z_hat_shifted
         
-        Q_cross = self.W_q_cross(Z_hat).view(B, L_pad, self.num_heads, self.head_dim)
-        K_cross = self.W_k_cross(M_global).view(B, self.M, self.num_kv_heads, self.head_dim)
-        V_cross = self.W_v_cross(M_global).view(B, self.M, self.num_kv_heads, self.head_dim)
+        # [Phase III-b] Per-Chunk Cross Attention (因果合規：M_causal 只含過去資訊)
+        Z_hat_chunks = Z_hat.view(B, N, self.C, -1)  # [B, N, C, D']
+        
+        Q_cross = self.W_q_cross(Z_hat_chunks)  # [B, N, C, nh*hd]
+        Q_cross = Q_cross.view(B * N, self.C, self.num_heads, self.head_dim)
+        
+        K_cross = self.W_k_cross(M_causal)  # [B, N, M, nkv*hd]
+        K_cross = K_cross.view(B * N, self.M, self.num_kv_heads, self.head_dim)
+        
+        V_cross = self.W_v_cross(M_causal)  # [B, N, M, nkv*hd]
+        V_cross = V_cross.view(B * N, self.M, self.num_kv_heads, self.head_dim)
         
         K_cross = repeat_kv(K_cross, self.num_key_value_groups)
         V_cross = repeat_kv(V_cross, self.num_key_value_groups)
         
-        Q_cross = Q_cross.transpose(1, 2)
-        K_cross = K_cross.transpose(1, 2)
+        Q_cross = Q_cross.transpose(1, 2)  # [B*N, nh, C, hd]
+        K_cross = K_cross.transpose(1, 2)  # [B*N, nh, M, hd]
         V_cross = V_cross.transpose(1, 2)
         
         I_cross = F.scaled_dot_product_attention(
-            Q_cross, K_cross, V_cross, dropout_p=0.0, is_causal=False
+            Q_cross, K_cross, V_cross, dropout_p=0.0, is_causal=False  # ✅ 合法！M_causal 裡只有過去
         )
         
         I_cross = I_cross.transpose(1, 2).reshape(B, L_pad, self.num_heads * self.head_dim)
-        I_cross = self.o_proj_cross(I_cross)
+        I_cross = self.o_proj_cross(I_cross)  # [B, L_pad, D]
         
         if pad_len > 0:
             Z_hat = Z_hat[:, :L, :]
