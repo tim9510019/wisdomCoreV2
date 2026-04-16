@@ -6,6 +6,7 @@ train32KAC.py — 四通道混合 32K CPT 物理隔離版 (N -> N+B 範式)
 2. Chunk-wise 物理隔離：將每筆長文本切分為 N (上文) 與 B (目標 Chunk)。
 3. 強制遮蔽：輸入端將 B 的位置全部替換為 <PAD>，杜絕雙向架構的未來洩漏。
 4. 拓撲引導梯度：僅對 B 區塊 (長度 1024) 計算 Loss，以高質量的全局梯度取代盲目猜測。
+5. 外科手術解凍：嚴格遵守 Roadmap 階段二矩陣，解鎖 Routing+LayerNorm，鎖死骨架。
 """
 
 import os
@@ -197,10 +198,39 @@ def main():
     base = transplant_and_freeze(model_id, base)
     model = AGIV2GForCausalLM(base).to(torch.bfloat16).cuda()
 
-    # Roadmap 階段二解凍策略：Unfreeze Routing + LayerNorm
-    unlock_keys = ["gate_fft", "gate_mem", "omegas", "mlp_H", "fft_norm", "Q_mem", "W_k_mem", "W_v_mem", "mem_norm", "W_q_cross", "o_proj_cross", "layernorm"]
+    # ==========================================
+    # Roadmap 階段二 (CPT) 解凍策略：外科手術矩陣
+    # ==========================================
+    # 🔓 解凍目標：Routing Components + ALL LayerNorms
+    unlock_keys = [
+        # --- 路由組件 (Routing Components) ---
+        "gate_fft", "gate_mem", "omegas", "mlp_H", 
+        "Q_mem", "W_k_mem", "W_v_mem", 
+        "W_q_cross", "W_k_cross", "W_v_cross", "o_proj_cross",
+        # --- 層歸一化 (LayerNorm 全面解鎖) ---
+        "norm" # 涵蓋 input_layernorm, q_norm, k_norm, fft_norm, mem_norm, final_norm 等
+    ]
+    
+    # 🔒 鎖死目標：LM Head + Attention Proj (局部) + Embedding
+    lock_keys = [
+        "W_q_loc", "W_k_loc", "W_v_loc", "o_proj_loc", # Attention Proj
+        "ffn",                                         # Local Feed Forward
+        "fc_out",                                      # LM Head
+        "embedding"                                    # Token Embeddings
+    ]
+
+    print("\n🔐 正在執行 CPT 外科手術參數凍結矩陣...")
     for name, param in model.named_parameters():
+        # 1. 預設全鎖定，若命中 unlock_keys 則解開
         param.requires_grad = any(k in name for k in unlock_keys)
+        
+        # 2. 絕對防呆：若命中 lock_keys，強制覆蓋為鎖死，避免前綴衝突
+        if any(locked in name for locked in lock_keys):
+            param.requires_grad = False
+            
+    # 印出正在訓練的參數狀態進行二次確認
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"✅ 解凍完畢！參與訓練的參數量: {trainable_params:,}")
 
     print(f"\n📦 讀取 Memory-Mapped 預處理四通道資料集 ({data_dir})...")
     processed_datasets = load_from_disk(data_dir)
@@ -212,6 +242,7 @@ def main():
         output_dir=save_dir,
         max_steps=5000,
         per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
         learning_rate=1e-4,
         warmup_ratio=0.05,
