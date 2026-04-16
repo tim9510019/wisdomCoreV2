@@ -1,0 +1,90 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
+  <diagram name="AGIV2G_Training_Plan" id="training_plan_01">
+    <mxGraphModel dx="1484" dy="868" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" value="AGIV2G 路由實用化終極訓練計畫 (2026 SOTA Roadmap)" vertex="1">
+          <mxGeometry height="40" width="800" x="400" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="stage1_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontStyle=1;fontSize=16;dashed=1;" value="階段一：TRIDATA (對比啟動期)" vertex="1">
+          <mxGeometry height="500" width="400" x="100" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_data" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="數據：6,000 筆 32K 三元組&lt;br&gt;(Query + Pos + Neg)&lt;br&gt;SQuAD + FineWeb-Edu" vertex="1">
+          <mxGeometry height="60" width="300" x="150" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_goal" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;paddingLeft=10;" value="核心目標：&lt;br&gt;1. 強制推開 gate_fft / gate_mem&lt;br&gt;2. 建立『訊號 vs 噪聲』辨識力&lt;br&gt;3. 激活梯度強心針 (register_hook)" vertex="1">
+          <mxGeometry height="80" width="300" x="150" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_params" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;paddingLeft=10;" value="參數細節：&lt;br&gt;* Max LR: 2e-4&lt;br&gt;* Scheduler: Cosine w/ Warmup&lt;br&gt;* Unfreeze: Routing Components only&lt;br&gt;* Grad Accumulation: 16" vertex="1">
+          <mxGeometry height="80" width="300" x="150" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_threshold" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" value="切換指標：&lt;br&gt;* Loss &lt; 3.0&lt;br&gt;* Gate_max &gt; 0.05&lt;br&gt;* NIAH 測試穩定性 &gt; 80%" vertex="1">
+          <mxGeometry height="60" width="300" x="150" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="stage2_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;verticalAlign=top;fontStyle=1;fontSize=16;dashed=1;" value="階段二：CPT (結構穩定期)" vertex="1">
+          <mxGeometry height="500" width="400" x="600" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_data" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="數據：40,000 筆 32K 混合數據&lt;br&gt;四通道：短文, 書籍, 代碼, NIAH&lt;br&gt;(比例: 5:3:1:1)" vertex="1">
+          <mxGeometry height="60" width="300" x="650" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_goal" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;paddingLeft=10;" value="核心目標：&lt;br&gt;1. 路由適應真實長文本分佈&lt;br&gt;2. 保持 Gemma 3 原始語言能力&lt;br&gt;3. 穩定全局路由權重路徑" vertex="1">
+          <mxGeometry height="80" width="300" x="650" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_params" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;paddingLeft=10;" value="參數細節：&lt;br&gt;* Max LR: 1e-4 (梯度下降階梯)&lt;br&gt;* Unfreeze: Routing + LayerNorm&lt;br&gt;* Optim: Paged AdamW 8bit&lt;br&gt;* Max Steps: 5000" vertex="1">
+          <mxGeometry height="80" width="300" x="650" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_threshold" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" value="切換指標：&lt;br&gt;* Causal Loss 收斂至平台期&lt;br&gt;* 跨領域 Zero-shot 能力不衰退&lt;br&gt;* Gate 分佈呈現特異性極化" vertex="1">
+          <mxGeometry height="60" width="300" x="650" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="stage3_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontStyle=1;fontSize=16;dashed=1;" value="階段三：SFT (指令對齊期)" vertex="1">
+          <mxGeometry height="500" width="400" x="1100" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_data" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="數據：10,000+ 筆高品質 SFT&lt;br&gt;LongAlpaca, UltraChat, NIAH-QA&lt;br&gt;多輪對話對齊" vertex="1">
+          <mxGeometry height="60" width="300" x="1150" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_goal" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;paddingLeft=10;" value="核心目標：&lt;br&gt;1. 人類行為對齊與格式控制&lt;br&gt;2. 解決路由與指令理解的耦合&lt;br&gt;3. 最終產出可部署的 AGIV2G" vertex="1">
+          <mxGeometry height="80" width="300" x="1150" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_params" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;paddingLeft=10;" value="參數細節：&lt;br&gt;* Max LR: 2e-5 (微雕模式)&lt;br&gt;* Freeze: Lock Gates (保護路由能力)&lt;br&gt;* Unfreeze: LM Head, Attention Proj&lt;br&gt;* Warmup Ratio: 0.1" vertex="1">
+          <mxGeometry height="80" width="300" x="1150" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_threshold" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" value="完成指標：&lt;br&gt;* Human-Eval 分數穩定&lt;br&gt;* 長文本推理正確率 &gt; 95%&lt;br&gt;* 幻覺發生率顯著降低" vertex="1">
+          <mxGeometry height="60" width="300" x="1150" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="e_s1_s2" edge="1" parent="1" source="stage1_bg" style="endArrow=classic;html=1;strokeWidth=4;strokeColor=#d6b656;" target="stage2_bg">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_s2_s3" edge="1" parent="1" source="stage2_bg" style="endArrow=classic;html=1;strokeWidth=4;strokeColor=#9673a6;" target="stage3_bg">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lr_plot_box" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;verticalAlign=top;fontStyle=2" value="學習率 (LR) 演化梯度趨勢圖" vertex="1">
+          <mxGeometry height="200" width="1400" x="100" y="650" as="geometry" />
+        </mxCell>
+        <mxCell id="lr_line" edge="1" parent="1" style="edgeStyle=none;curved=1;html=1;endArrow=none;endFill=0;strokeWidth=3;strokeColor=#FF0000;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="200" y="680" />
+              <mxPoint x="450" y="700" />
+              <mxPoint x="600" y="780" />
+              <mxPoint x="800" y="740" />
+              <mxPoint x="1000" y="810" />
+              <mxPoint x="1150" y="790" />
+            </Array>
+            <mxPoint x="150" y="750" as="sourcePoint" />
+            <mxPoint x="1450" y="830" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lr_s1_label" parent="1" style="text;html=1;fontColor=#FF0000;" value="TRIDATA: 2e-4" vertex="1">
+          <mxGeometry height="30" width="100" x="250" y="670" as="geometry" />
+        </mxCell>
+        <mxCell id="lr_s2_label" parent="1" style="text;html=1;fontColor=#FF0000;" value="CPT: 1e-4" vertex="1">
+          <mxGeometry height="30" width="100" x="750" y="710" as="geometry" />
+        </mxCell>
+        <mxCell id="lr_s3_label" parent="1" style="text;html=1;fontColor=#FF0000;" value="SFT: 2e-5" vertex="1">
+          <mxGeometry height="30" width="100" x="1250" y="770" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
