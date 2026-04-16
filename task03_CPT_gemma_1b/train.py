@@ -5,8 +5,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ==========================================
 # 0. SOTA 環境配置 (必須在 import torch 之前)
 # ==========================================
-# 完全對齊 train.py: 使用設備 "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
+# 完全對齊 train.py: 使用設備 "1" (註: 根據你原碼，環境變數設為 "0")
+os.environ["CUDA_VISIBLE_DEVICES"] = "1" 
 os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -15,11 +15,11 @@ import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer, TrainerCallback, set_seed
 from transformers.trainer_utils import get_last_checkpoint
-from datasets import load_dataset, interleave_datasets
+from datasets import load_from_disk # 改為讀取本地資料集
 import math
 import csv
 import time
-import shutil # 對齊 train.py: 補回 shutil
+import shutil 
 
 from AGIV2G import AGIV2G
 
@@ -195,56 +195,19 @@ class AGIV2GMonitor(TrainerCallback):
                     print(f"\n[Monitor] 🌟 Eval Loss 進步 ({old_best:.4f} -> {current_eval_loss:.4f})，已淬鍊權重至 {best_model_path}")
 
 # ==========================================
-# 3. 資料集隔離 (Train: 前段, Val: 後段)
-# ==========================================
-
-class Packed32KDataset(torch.utils.data.IterableDataset):
-    def __init__(self, tokenizer, max_length=32768, is_val=False, max_samples=None):
-        ds_edu = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=False)
-        ds_cos = load_dataset("HuggingFaceTB/cosmopedia", name="stanford", split="train", streaming=False)
-        
-        if is_val:
-            # 驗證集：只拿前面的 1000 筆跟 500 筆資料就足夠評估了
-            ds_edu, ds_cos = ds_edu.take(1000), ds_cos.take(500)
-        else:
-            # 訓練集：跳過前面給驗證集用掉的資料後，剩餘的「無限供應」，不設 .take() 上限！
-            ds_edu, ds_cos = ds_edu.skip(1000), ds_cos.skip(500)
-
-        self.dataset = interleave_datasets([ds_edu, ds_cos], probabilities=[0.6, 0.4])
-        self.tokenizer = tokenizer
-        self.max_length = int(max_length)
-        self.max_samples = max_samples 
-
-    def __iter__(self):
-        buffer = []
-        yield_count = 0 
-        
-        for ex in self.dataset:
-            text = ex.get('text','')
-            if not text: continue
-            tokens = self.tokenizer(text, add_special_tokens=False)['input_ids'] + [self.tokenizer.eos_token_id]
-            buffer.extend(tokens)
-            
-            while len(buffer) >= self.max_length:
-                chunk = buffer[:self.max_length]
-                yield {
-                    "input_ids": torch.tensor(chunk, dtype=torch.long), 
-                    "labels": torch.tensor(chunk, dtype=torch.long)
-                }
-                buffer = buffer[self.max_length:]
-                yield_count += 1
-                
-                if self.max_samples is not None and yield_count >= self.max_samples:
-                    return
-
-# ==========================================
-# 4. 主流程
+# 3. 主流程 (無痛讀取預處理資料)
 # ==========================================
 
 def main():
     model_id = "google/gemma-3-1b-it"
     save_dir = "./agiv2-cpt"
+    data_dir = "./agiv2_pretokenized_32k" # 必須先執行 prepare_data.py
+    
     os.makedirs(save_dir, exist_ok=True)
+    
+    # 邏輯檢查：確認預處理資料是否存在，避免未準備就緒直接報錯
+    if not os.path.exists(data_dir):
+        raise FileNotFoundError(f"找不到預處理資料集路徑 {data_dir}。請確認是否已先執行獨立的資料預處理腳本。")
     
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
@@ -252,11 +215,12 @@ def main():
     base = AGIV2G(vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26)
     base = transplant_and_freeze(model_id, base)
     
-    # 完全對齊 train.py：隱式使用預設的 use_gc=True，移除傳遞參數
     model = AGIV2GForCausalLM(base).to(torch.bfloat16).cuda()
 
-    train_ds = Packed32KDataset(tokenizer, max_length=32768, is_val=False)
-    val_ds = Packed32KDataset(tokenizer, max_length=32768, is_val=True, max_samples=20) 
+    print("讀取 Memory-Mapped 預處理資料集...")
+    processed_datasets = load_from_disk(data_dir)
+    train_ds = processed_datasets["train"]
+    val_ds = processed_datasets["test"] 
 
     args = TrainingArguments(
         output_dir=save_dir,
@@ -275,7 +239,8 @@ def main():
         eval_steps=100,
         optim="paged_adamw_8bit", 
         report_to="none", 
-        gradient_checkpointing=False
+        gradient_checkpointing=False,
+        dataloader_num_workers=4, # 這裡加入多執行緒，徹底發揮預處理 IO 效益
     )
 
     trainer = Trainer(
