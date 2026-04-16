@@ -126,7 +126,7 @@ class RouterTrainer(Trainer):
 def main():
     model_id = "google/gemma-3-1b-it"
     save_dir = "./agiv2_zerogate_checkpoints"
-    data_dir = "./agiv2_router_v3_max"
+    data_dir = "./agiv2_stage1_tridata_v5"
     
     raw_ds = load_from_disk(data_dir)
     if isinstance(raw_ds, Dataset):
