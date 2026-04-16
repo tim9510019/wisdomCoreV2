@@ -23,7 +23,7 @@ from datasets import load_from_disk
 
 from AGIV2G import AGIV2G
 # 移除引入舊版的 AGIV2GMonitor，其餘維持不變
-from train import AGIV2GForCausalLM, transplant_and_freeze
+from trainAGI import AGIV2GForCausalLM, transplant_and_freeze
 
 set_seed(42)
 
@@ -140,7 +140,7 @@ def main():
 
     args = TrainingArguments(
         output_dir=save_dir,
-        max_steps=40000,
+        max_steps=5000,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
         learning_rate=1e-4,
@@ -149,7 +149,7 @@ def main():
         weight_decay=0.01,
         bf16=True,
         logging_steps=1,
-        save_steps=100, # 🌟 關鍵效能修正：避免每步存檔拖垮 I/O，對齊 eval_steps
+        save_steps=10, # 🌟 關鍵效能修正：避免每步存檔拖垮 I/O，對齊 eval_steps
         save_total_limit=2, # 僅保留最後 2 個 Checkpoint，節省硬碟空間
         eval_strategy="steps",
         eval_steps=100,
