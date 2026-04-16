@@ -162,7 +162,7 @@ class RouterTrainerAC(Trainer):
 def main():
     model_id = "google/gemma-3-1b-it"
     save_dir = "./agiv2_zerogate_ac_checkpoints" 
-    data_dir = "./agiv2_stage1_tridata_ac" # 確保讀取的是 AC 版的純淨資料集
+    data_dir = "./agiv2_stage1_tridata_v5_ac" # 確保讀取的是 AC 版的純淨資料集
     
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0

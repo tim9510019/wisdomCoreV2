@@ -1,9 +1,8 @@
 """
 prepareRouterAC.py — 物理隔離版數據引擎 (多樣性完全恢復)
 ===========================================================
-保留原版 V5 的四通道異質性與隨機插針，但強制將序列物理切分為：
-- N 區塊: 異質背景 + 隨機插針 + 提問 (Query 鎖定尾端)
-- B 區塊: 純答案 + PAD
+- N 區塊: 異質背景 + 隨機插針 + 提問 (Query 鎖定於絕對尾端)
+- B 區塊: 純答案 + PAD 填充至 512
 """
 import os
 import random
@@ -27,7 +26,6 @@ class QuantumRouterEngineAC:
     def __init__(self):
         print(f"🚀 [啟動] 量子疊加態數據引擎 AC 版 (多樣性保留 + N->N+B)")
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-        
         self.squad = load_dataset("squad_v2", split="train")
         self.fineweb = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train[:100000]")
         self.haystack_texts = [ex["text"] for ex in self.fineweb]
@@ -35,7 +33,6 @@ class QuantumRouterEngineAC:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # 完全保留多樣化通道
         self.code_templates = [
             ("void update_router(int gate_id) {{ if (gate_id == {0}) active = true; }}", True),
             ("export const ROUTE_CONFIG = {{ mode: 'FFT', depth: {0} }};", True),
@@ -44,7 +41,6 @@ class QuantumRouterEngineAC:
         ]
 
     def _generate_trinity_logic(self):
-        """保留 JSON/XML/Protocol 等異質邏輯表達"""
         q1 = self.squad[random.randint(0, len(self.squad)-1)]
         q2 = self.squad[random.randint(0, len(self.squad)-1)]
         subject = q1['context'][:60].strip().replace('\n', ' ')
@@ -72,7 +68,6 @@ class QuantumRouterEngineAC:
         return fa, fb, fc, query, secret_val
 
     def _get_heterogeneous_filler(self, length):
-        """保留 70% 文本 + 30% 程式碼的異質背景"""
         tokens = []
         while len(tokens) < length:
             if random.random() < 0.7:
@@ -92,19 +87,16 @@ class QuantumRouterEngineAC:
         t_b = self.tokenizer.encode(fb, add_special_tokens=False)
         t_c = self.tokenizer.encode(fc, add_special_tokens=False)
         
-        # 定義 N 區塊的長度
         n_len = target_len - B_SIZE
         available_filler_len = n_len - len(q_ids)
         base_filler = self._get_heterogeneous_filler(available_filler_len)
         
         def inject_into_ocean(filler, content_list):
             res = list(filler)
-            # 保留隨機插針特性
             for p, content in sorted(content_list, key=lambda x: x[0], reverse=True):
                 idx = int(len(filler) * p)
-                res[idx:idx] = content
-            # 確保 Query 永遠在 N 的最尾端
-            return res[:available_filler_len] + q_ids
+                res = res[:idx] + content + res[idx:] # 安全插入，不覆蓋
+            return res[:available_filler_len] + q_ids # 安全截斷背景，保證 Query 在絕對尾部
 
         pos_a = random.uniform(0.05, 0.45)
         pos_b, pos_c = random.uniform(pos_a + 0.15, 0.90), random.uniform(0.10, 0.95)
@@ -112,7 +104,6 @@ class QuantumRouterEngineAC:
         n_pos_ids = inject_into_ocean(base_filler, [(pos_a, t_a), (pos_b, t_b)])
         n_neg_ids = inject_into_ocean(base_filler, [(pos_a, t_a), (pos_c, t_c)])
 
-        # 構造 B 區塊 (長度嚴格為 512，前面是答案，後面是 PAD)
         def build_b_block(ans_text):
             ans_ids = self.tokenizer.encode(ans_text, add_special_tokens=False)
             if len(ans_ids) > B_SIZE: return ans_ids[:B_SIZE]
@@ -121,10 +112,7 @@ class QuantumRouterEngineAC:
         pos_final = n_pos_ids + build_b_block(f" {secret_val}")
         neg_final = n_neg_ids + build_b_block(" REDACTED")
 
-        return {
-            "pos_ids": pos_final,
-            "neg_ids": neg_final
-        }
+        return {"pos_ids": pos_final, "neg_ids": neg_final}
 
 def main():
     engine = QuantumRouterEngineAC()
