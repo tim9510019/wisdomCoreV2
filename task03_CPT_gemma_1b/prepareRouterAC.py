@@ -29,7 +29,7 @@ set_seed(2026)
 # 1. 具備記憶能力的監控器 (完全對齊 V3)
 # ==========================================
 class ZeroGateMonitor(TrainerCallback):
-    def __init__(self, path="./zerogate_32k_log.csv", save_dir="./agiv2_zerogate_ac_checkpoints"):
+    def __init__(self, path="./zerogate_32k_ac_log.csv", save_dir="./agiv2_zerogate_ac_checkpoints"):
         self.path = path
         self.save_dir = save_dir
         self.best_eval_loss = float('inf')
