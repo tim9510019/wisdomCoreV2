@@ -161,6 +161,7 @@ def main():
         gradient_accumulation_steps=32,
         learning_rate=3e-4,
         lr_scheduler_type="cosine",
+        warmup_ratio=0.1,          # 建議給予 10% 的步數進行線性預熱
         bf16=True,
         logging_steps=1,
         eval_strategy="steps",
