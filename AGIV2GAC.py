@@ -184,8 +184,8 @@ class AGIV2GlobalBlock(nn.Module):
         self.q_norm = GemmaRMSNorm(head_dim)
         self.k_norm = GemmaRMSNorm(head_dim)
         
-        self.gate_fft = nn.Parameter(torch.zeros(1))
-        self.gate_mem = nn.Parameter(torch.zeros(1))
+        self.gate_fft = nn.Parameter(torch.ones(1))
+        self.gate_mem = nn.Parameter(torch.ones(1))
         
         self.omegas = nn.Parameter(torch.randn(K))
         self.mlp_H = nn.Sequential(
@@ -368,7 +368,7 @@ class AGIV2GlobalBlock(nn.Module):
 # ==========================================
 
 class AGIV2G(nn.Module):
-    def __init__(self, vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26, C=1024, K=1024, M=1024, num_heads=4, num_kv_heads=1, head_dim=256):
+    def __init__(self, vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26, C=256, K=1024, M=1024, num_heads=4, num_kv_heads=1, head_dim=256):
         super().__init__()
         self.D = D
         self.embedding = nn.Embedding(vocab_size, D)
