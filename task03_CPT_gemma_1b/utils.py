@@ -2,7 +2,10 @@ import os
 import random
 import torch
 import numpy as np
-from transformers import AutoTokenizer
+import torch.nn as nn
+import torch.utils.checkpoint as checkpoint
+import math
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
@@ -121,3 +124,117 @@ class DynamicACDataset(Dataset):
         # 及時產生一筆數據
         base_len = random.choice(self.target_lengths)
         return self.engine.create_triplet_ac(base_len)
+
+# ==========================================
+# 1. 訓練包裝器 (動態 GC & Chunked Loss)
+# ==========================================
+
+class AGIV2GForCausalLM(nn.Module):
+    def __init__(self, base_model, use_gc=True):
+        super().__init__()
+        self.base_model = base_model
+        self.use_gc = use_gc
+
+    def forward(self, input_ids, labels=None, **kwargs):
+        hidden_states = self.base_model.embedding(input_ids)
+        # 保留 Gemma 架構必須的縮放
+        hidden_states = hidden_states * math.sqrt(self.base_model.D)
+        
+        for i, block in enumerate(self.base_model.blocks):
+            shift_size = (block.C // 2) if (i % 2 != 0) else 0
+            if self.training and self.use_gc:
+                hidden_states = checkpoint.checkpoint(
+                    block, hidden_states, shift_size, use_reentrant=False
+                )
+            else:
+                hidden_states = block(hidden_states, shift_size=shift_size)
+                
+        hidden_states = self.base_model.final_norm(hidden_states)
+        
+        loss = None
+        logits = None
+        
+        if labels is not None:
+            shift_hidden = hidden_states[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            loss_fct = nn.CrossEntropyLoss(reduction="sum", ignore_index=-100)
+            total_loss = 0.0
+            valid_tokens = 0.0 
+            chunk_size = 2048 
+            seq_len = shift_hidden.size(1)
+            
+            for i in range(0, seq_len, chunk_size):
+                end_idx = min(i + chunk_size, seq_len)
+                c_hidden = shift_hidden[:, i:end_idx, :]
+                c_logits = self.base_model.fc_out(c_hidden)
+                c_labels = shift_labels[:, i:end_idx]
+                
+                c_loss = loss_fct(c_logits.reshape(-1, c_logits.size(-1)).float(), c_labels.reshape(-1))
+                total_loss += c_loss
+                
+                valid_tokens += (c_labels != -100).sum().item()
+                del c_logits, c_hidden
+                
+            loss = total_loss / max(valid_tokens, 1)
+        else:
+            logits = self.base_model.fc_out(hidden_states)
+            
+        return {"loss": loss, "logits": logits} if logits is not None else {"loss": loss}
+
+# ==========================================
+# 2. 權重移植、凍結與動態監控 Callback
+# ==========================================
+
+def transplant_and_freeze(model_id, agiv2_base):
+    print(f"🔄 從 {model_id} 移植知識庫 (使用 dtype=bf16)...")
+    src_model = AutoModelForCausalLM.from_pretrained(
+        model_id, dtype=torch.bfloat16, device_map="cpu"
+    )
+    src_sd = src_model.state_dict()
+    new_sd = {}
+
+    new_sd['embedding.weight'] = src_sd.get('model.embed_tokens.weight')
+    # 保留 Gemma 可能的權重綁定邏輯
+    new_sd['fc_out.weight'] = src_sd.get('lm_head.weight') if 'lm_head.weight' in src_sd else src_sd.get('model.embed_tokens.weight')
+    new_sd['final_norm.weight'] = src_sd.get('model.norm.weight')
+
+    for i in range(26):
+        s_pre = f"model.layers.{i}."
+        a_pre = f"blocks.{i}."
+        
+        new_sd[f"{a_pre}input_layernorm.weight"] = src_sd.get(f"{s_pre}input_layernorm.weight")
+        new_sd[f"{a_pre}post_attention_layernorm.weight"] = src_sd.get(f"{s_pre}post_attention_layernorm.weight")
+        new_sd[f"{a_pre}pre_feedforward_layernorm.weight"] = src_sd.get(f"{s_pre}pre_feedforward_layernorm.weight")
+        new_sd[f"{a_pre}post_feedforward_layernorm.weight"] = src_sd.get(f"{s_pre}post_feedforward_layernorm.weight")
+        
+        new_sd[f"{a_pre}q_norm.weight"] = src_sd.get(f"{s_pre}self_attn.q_norm.weight")
+        new_sd[f"{a_pre}k_norm.weight"] = src_sd.get(f"{s_pre}self_attn.k_norm.weight")
+        
+        new_sd[f"{a_pre}ffn.gate_proj.weight"] = src_sd.get(f"{s_pre}mlp.gate_proj.weight")
+        new_sd[f"{a_pre}ffn.up_proj.weight"] = src_sd.get(f"{s_pre}mlp.up_proj.weight")
+        new_sd[f"{a_pre}ffn.down_proj.weight"] = src_sd.get(f"{s_pre}mlp.down_proj.weight")
+
+        new_sd[f"{a_pre}W_q_loc.weight"] = src_sd.get(f"{s_pre}self_attn.q_proj.weight")
+        new_sd[f"{a_pre}W_k_loc.weight"] = src_sd.get(f"{s_pre}self_attn.k_proj.weight")
+        new_sd[f"{a_pre}W_v_loc.weight"] = src_sd.get(f"{s_pre}self_attn.v_proj.weight")
+        new_sd[f"{a_pre}o_proj_loc.weight"] = src_sd.get(f"{s_pre}self_attn.o_proj.weight")
+
+    new_sd = {k: v for k, v in new_sd.items() if v is not None}
+    agiv2_base.load_state_dict(new_sd, strict=False)
+    
+    frozen_count, trainable_count = 0, 0
+    for name, param in agiv2_base.named_parameters():
+        param.requires_grad = name not in new_sd
+        if param.requires_grad:
+            param.data = param.data.to(torch.bfloat16)
+            trainable_count += param.numel()
+        else:
+            frozen_count += param.numel()
+
+    print(f"✅ 知識庫移植完成！")
+    print(f"🔒 凍結 Gemma 3 參數: {frozen_count:,} | 🟢 新架構可訓練參數: {trainable_count:,}")
+
+    del src_model
+    import gc; gc.collect(); torch.cuda.empty_cache()
+    return agiv2_base

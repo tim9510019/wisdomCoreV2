@@ -22,7 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from AGIV2GAC import AGIV2G 
-from trainAGI import AGIV2GForCausalLM, transplant_and_freeze
+from utils import AGIV2GForCausalLM, transplant_and_freeze
 
 set_seed(2026)
 
