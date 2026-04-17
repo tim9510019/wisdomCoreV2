@@ -15,22 +15,50 @@ import torch
 from transformers import AutoTokenizer, TrainingArguments, Trainer, set_seed, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import Dataset
-from utils import QuantumRouterEngineAC, DynamicACDataset
 
 # 確保路徑正確
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1" 
+os.environ["BITSANDBYTES_NOWELCOME"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 from AGIV2GAC import AGIV2G 
-from utils import AGIV2GForCausalLM, transplant_and_freeze
+from utils import AGIV2GForCausalLM, transplant_and_freeze, QuantumRouterEngineAC, DynamicACDataset
 
 set_seed(2026)
 
 # ==========================================
-# 1. 具備記憶能力的監控器 (完全對齊 trainRouter.py)
+# 0. 訓練配置核心參數區 (方便統一修改)
+# ==========================================
+MODEL_ID = "google/gemma-3-1b-it"
+SAVE_DIR = "./agiv2_zerogate_ac_checkpoints_1K"
+LOG_PATH = "./zerogate_32k_ac_1k_log.csv"
+
+# 🚀 訓練步數與排程 (使用者自訂)
+MAX_STEPS = 2000                   # 🏆 指定要訓練的總步數 (取代 num_train_epochs)
+WARMUP_STEPS = 200                 # 🌟 改用 WARMUP_STEPS 避免 deprecated 警告 (約 10%)
+EVAL_STEPS = 50                    # 多少步進行一次評估
+SAVE_STEPS = 10                    # 多少步保存一次 Checkpoint
+SAVE_TOTAL_LIMIT = 2               # 最大保留 Checkpoint 數量
+LOGGING_STEPS = 1                  # 多少步記錄一次 Log
+
+# 🚀 模型與資料參數
+TARGET_LENGTHS = [1024]            # 訓練資料基準長度
+B_SIZE = 512                       # 隔離預測區塊 (B Block) 尺寸
+NUM_TRAIN_SAMPLES = 200000         # 訓練集動態生成池大小
+NUM_EVAL_SAMPLES = 50              # 評估集動態生成總數
+BATCH_SIZE_PER_DEVICE = 1          # 單卡 Batch Size
+GRAD_ACCUMULATION_STEPS = 32       # 梯度累積步數
+LEARNING_RATE = 3e-4               # 學習率
+
+
+# ==========================================
+# 1. 具備記憶能力的監控器
 # ==========================================
 class ZeroGateMonitor(TrainerCallback):
-    def __init__(self, path="./zerogate_32k_ac_1k_log.csv", save_dir="./agiv2_zerogate_ac_checkpoints_1K"):
+    def __init__(self, path=LOG_PATH, save_dir=SAVE_DIR):
         self.path = path
         self.save_dir = save_dir
         self.best_eval_loss = float('inf')
@@ -91,8 +119,28 @@ class ZeroGateMonitor(TrainerCallback):
                 print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})，跳過保存。")
 
 # ==========================================
-# 2. 物理隔離 Trainer (N -> N+B)
+# 2. 物理隔離 Trainer 與 資料收集器 (DataCollator)
 # ==========================================
+class ACDataCollator:
+    def __init__(self, pad_token_id):
+        self.pad_token_id = pad_token_id
+        
+    def __call__(self, features):
+        max_pos = max(len(f["pos_ids"]) for f in features)
+        max_neg = max(len(f["neg_ids"]) for f in features)
+        
+        # 🌟 使用 Left Padding (左側填充)
+        # 這樣可確保尾部的 B_SIZE Tokens 絕對對齊，不破壞 N -> B 的物理隔離範圍
+        for f in features:
+            f["pos_ids"] = [self.pad_token_id] * (max_pos - len(f["pos_ids"])) + list(f["pos_ids"])
+            f["neg_ids"] = [self.pad_token_id] * (max_neg - len(f["neg_ids"])) + list(f["neg_ids"])
+            
+        return {
+            "pos_ids": torch.tensor([f["pos_ids"] for f in features], dtype=torch.long),
+            "neg_ids": torch.tensor([f["neg_ids"] for f in features], dtype=torch.long)
+        }
+
+
 class RouterTrainerAC(Trainer):
     def __init__(self, pad_token_id=0, b_size=512, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -162,26 +210,17 @@ class RouterTrainerAC(Trainer):
 # 3. 主流程
 # ==========================================
 def main():
-    model_id = "google/gemma-3-1b-it"
-    save_dir = "./agiv2_zerogate_ac_checkpoints_1K" 
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     print("\n📦 [資料集] 正在初始化及時數據生成引擎...")
     engine = QuantumRouterEngineAC()
-    NUM_SAMPLES_TOTAL = 200000
-    TARGET_LENGTHS = [1024]
-    
-    train_size = int(NUM_SAMPLES_TOTAL * 0.95)
-    # EVAL 50 筆限制對齊
-    test_size = 50
 
-    train_ds = DynamicACDataset(engine, TARGET_LENGTHS, train_size)
-    eval_ds = DynamicACDataset(engine, TARGET_LENGTHS, test_size)
+    train_ds = DynamicACDataset(engine, TARGET_LENGTHS, NUM_TRAIN_SAMPLES)
+    eval_ds = DynamicACDataset(engine, TARGET_LENGTHS, NUM_EVAL_SAMPLES)
 
     base = AGIV2G(vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26)
-    base = transplant_and_freeze(model_id, base)
+    base = transplant_and_freeze(MODEL_ID, base)
     model = AGIV2GForCausalLM(base, use_gc=True)
     
     unlock_keywords = ["gate_fft", "gate_mem", "omegas", "mlp_H", "fft_norm", "Q_mem", "W_k_mem", "W_v_mem", "mem_norm", "W_q_cross", "o_proj_cross"]
@@ -194,20 +233,20 @@ def main():
 
     # 🌟 完全對齊 TrainingArguments 
     args = TrainingArguments(
-        output_dir=save_dir,
-        num_train_epochs=1,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,       
-        gradient_accumulation_steps=32,
-        learning_rate=3e-4,
+        output_dir=SAVE_DIR,
+        max_steps=MAX_STEPS,                    # 🌟 替換 num_train_epochs，由上面指定
+        per_device_train_batch_size=BATCH_SIZE_PER_DEVICE,
+        per_device_eval_batch_size=BATCH_SIZE_PER_DEVICE,       
+        gradient_accumulation_steps=GRAD_ACCUMULATION_STEPS,
+        learning_rate=LEARNING_RATE,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.1,             # 🌟 對齊 10% 步數預熱
+        warmup_steps=WARMUP_STEPS,              # 🌟 取代 warmup_ratio，解決 warnings
         bf16=True,
-        logging_steps=1,
+        logging_steps=LOGGING_STEPS,
         eval_strategy="steps",
-        eval_steps=50,
-        save_steps=10,                # 🌟 對齊每 10 步儲存一次
-        save_total_limit=2,           # 🌟 對齊保留 2 個 Checkpoint
+        eval_steps=EVAL_STEPS,
+        save_steps=SAVE_STEPS,
+        save_total_limit=SAVE_TOTAL_LIMIT,
         optim="paged_adamw_8bit",
         remove_unused_columns=False,
         report_to="none"
@@ -215,16 +254,17 @@ def main():
 
     trainer = RouterTrainerAC(
         pad_token_id=pad_id,
-        b_size=512,
+        b_size=B_SIZE,
         model=model,
         args=args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
-        callbacks=[ZeroGateMonitor(save_dir=save_dir)]
+        data_collator=ACDataCollator(pad_id),   # 🌟 修正 ValueError 的關鍵，提供自訂的 DataCollator 加入 Left Padding
+        callbacks=[ZeroGateMonitor(path=LOG_PATH, save_dir=SAVE_DIR)]
     )
 
     # 🌟 自動斷點偵測
-    last_checkpoint = get_last_checkpoint(save_dir)
+    last_checkpoint = get_last_checkpoint(SAVE_DIR)
     if last_checkpoint is not None:
         print(f"\n🚀 偵測到中斷點 {last_checkpoint}，啟動狀態無損恢復訓練...")
     else:
@@ -233,7 +273,7 @@ def main():
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
     # 🌟 儲存最終結果
-    final_path = os.path.join(save_dir, "final_router_ac.pth")
+    final_path = os.path.join(SAVE_DIR, "final_router_ac.pth")
     torch.save(model.state_dict() if not hasattr(model, 'module') else model.module.state_dict(), final_path)
     print(f"🎉 訓練完成！最終權重已儲存至 {final_path}")
 
