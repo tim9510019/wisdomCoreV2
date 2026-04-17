@@ -106,6 +106,7 @@ class QuantumRouterEngineAC:
 
         def build_b_block(ans_text):
             ans_ids = self.tokenizer.encode(ans_text, add_special_tokens=False)
+            ans_ids.append(self.tokenizer.eos_token_id)
             if len(ans_ids) > B_SIZE: return ans_ids[:B_SIZE]
             return ans_ids + [self.tokenizer.pad_token_id] * (B_SIZE - len(ans_ids))
 
