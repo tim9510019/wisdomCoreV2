@@ -31,6 +31,7 @@ def load_ac_model():
     model = AGIV2G(
         vocab_size=262144, 
         D=1152, 
+        C=256,
         hidden_dim=6912, 
         num_blocks=26,
         head_dim=256
