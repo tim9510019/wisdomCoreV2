@@ -35,6 +35,7 @@ set_seed(2026)
 MODEL_ID = "google/gemma-3-1b-it"
 SAVE_DIR = "./agiv2_zerogate_ac_checkpoints_4K"
 LOG_PATH = "./zerogate_32k_ac_4k_log.csv"
+BEST_2K_PATH = "./agiv2_zerogate_ac_checkpoints_2K/best_model.pth"
 
 # 🚀 訓練步數與排程 (使用者自訂)
 MAX_STEPS = 2000                   # 🏆 指定要訓練的總步數 (取代 num_train_epochs)
@@ -225,13 +226,12 @@ def main():
     model = AGIV2GForCausalLM(base, use_gc=True)
     
     # 🌟 載入 2K 階段的 best_model 權重
-    model_2k_path = "./agiv2_zerogate_ac_checkpoints_2K/best_model.pth"
-    if os.path.exists(model_2k_path):
-        print(f"\n🔄 成功尋獲 2K 階段之最佳權重，正在載入以進行 4K 延伸訓練: {model_2k_path}")
-        state_dict = torch.load(model_2k_path, map_location="cpu")
+    if os.path.exists(BEST_2K_PATH):
+        print(f"\n🔄 成功尋獲 2K 階段之最佳權重，正在載入以進行 4K 延伸訓練: {BEST_2K_PATH}")
+        state_dict = torch.load(BEST_2K_PATH, map_location="cpu")
         model.load_state_dict(state_dict, strict=False)
     else:
-        print(f"\n⚠️ 找不到 2K 權重檔案 {model_2k_path}，將從頭開始訓練！")
+        print(f"\n⚠️ 找不到 2K 權重檔案 {BEST_2K_PATH}，將從頭開始訓練！")
     
     unlock_keywords = ["gate_fft", "gate_mem", "omegas", "mlp_H", "fft_norm", "Q_mem", "W_k_mem", "W_v_mem", "mem_norm", "W_q_cross", "o_proj_cross"]
     for name, param in model.named_parameters():
