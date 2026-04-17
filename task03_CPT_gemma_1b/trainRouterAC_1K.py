@@ -219,7 +219,7 @@ def main():
     train_ds = DynamicACDataset(engine, TARGET_LENGTHS, NUM_TRAIN_SAMPLES)
     eval_ds = DynamicACDataset(engine, TARGET_LENGTHS, NUM_EVAL_SAMPLES)
 
-    base = AGIV2G(vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26)
+    base = AGIV2G(vocab_size=262144, D=1152, C=256, hidden_dim=6912, num_blocks=26)
     base = transplant_and_freeze(MODEL_ID, base)
     model = AGIV2GForCausalLM(base, use_gc=True)
     
