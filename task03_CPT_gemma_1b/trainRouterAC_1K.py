@@ -14,7 +14,8 @@ import time
 import torch
 from transformers import AutoTokenizer, TrainingArguments, Trainer, set_seed, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
-from datasets import load_from_disk, Dataset
+from datasets import Dataset
+from utils import QuantumRouterEngineAC, DynamicACDataset
 
 # 確保路徑正確
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -163,20 +164,21 @@ class RouterTrainerAC(Trainer):
 def main():
     model_id = "google/gemma-3-1b-it"
     save_dir = "./agiv2_zerogate_ac_checkpoints_1K" 
-    data_dir = "./agiv2_stage1_tridata_v5_ac_1k" # 確保讀取的是 AC 版的純淨資料集
     
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
-    raw_ds = load_from_disk(data_dir)
-    if isinstance(raw_ds, Dataset):
-        ds = raw_ds.train_test_split(test_size=0.05, seed=2026)
-    else:
-        ds = raw_ds
-        
+    print("\n📦 [資料集] 正在初始化及時數據生成引擎...")
+    engine = QuantumRouterEngineAC()
+    NUM_SAMPLES_TOTAL = 200000
+    TARGET_LENGTHS = [1024]
+    
+    train_size = int(NUM_SAMPLES_TOTAL * 0.95)
     # EVAL 50 筆限制對齊
-    eval_limit = min(50, len(ds["test"]))
-    ds["test"] = ds["test"].select(range(eval_limit))
+    test_size = 50
+
+    train_ds = DynamicACDataset(engine, TARGET_LENGTHS, train_size)
+    eval_ds = DynamicACDataset(engine, TARGET_LENGTHS, test_size)
 
     base = AGIV2G(vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26)
     base = transplant_and_freeze(model_id, base)
@@ -216,8 +218,8 @@ def main():
         b_size=512,
         model=model,
         args=args,
-        train_dataset=ds["train"],
-        eval_dataset=ds["test"],
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
         callbacks=[ZeroGateMonitor(save_dir=save_dir)]
     )
 

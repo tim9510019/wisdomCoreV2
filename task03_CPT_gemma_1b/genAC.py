@@ -13,7 +13,8 @@ import sys
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
-from datasets import load_from_disk, Dataset
+from datasets import Dataset
+from utils import QuantumRouterEngineAC, DynamicACDataset
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +23,6 @@ from AGIV2GAC import AGIV2G
 
 MODEL_ID = "google/gemma-3-1b-it"
 CHECKPOINT_PATH = "./agiv2_zerogate_ac_checkpoints_1K/best_model.pth"
-DATA_PATH = "./agiv2_stage1_tridata_v5_ac_1k"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 B_SIZE = 512
 
@@ -105,19 +105,11 @@ def generate_ac_robust(model, tokenizer, prompt_ids, max_gen=64):
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     
-    if os.path.exists(DATA_PATH):
-        print(f"\n📂 [資料集] 正在載入測試資料：{DATA_PATH}")
-        raw_ds = load_from_disk(DATA_PATH)
-        if isinstance(raw_ds, Dataset):
-            ds = raw_ds.train_test_split(test_size=0.05, seed=2026)
-        else:
-            ds = raw_ds
-            
-        test_ds = ds["test"]
-        print(f"✅ 成功載入測試集，共 {len(test_ds)} 筆")
-    else:
-        print(f"❌ 找不到資料集 {DATA_PATH}，請檢查路徑。")
-        sys.exit(1)
+    print(f"\n📦 [資料集] 正在初始化及時數據生成引擎...")
+    engine = QuantumRouterEngineAC()
+    # 我們只需要一筆測試資料，所以生成數量設為1
+    test_ds = DynamicACDataset(engine, target_lengths=[1024], num_samples=1)
+    print(f"✅ 成功初始化及時測試集")
         
     model = load_ac_model()
     check_routing_gates(model)
