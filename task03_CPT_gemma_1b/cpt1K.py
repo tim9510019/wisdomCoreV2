@@ -1,17 +1,20 @@
 import os
 import random
+import pyarrow as pa
+import pyarrow.parquet as pq
 from typing import Iterator, Dict, List, Any
-from datasets import load_dataset, Dataset
+from datasets import load_dataset
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
 # =====================================================================
-# [ 全局配置區 ] 物理隔絕矩陣參數
+# [ 全局配置區 ] 物理隔絕矩陣參數 (Physical Isolation Matrix)
 # =====================================================================
 MODEL_ID = "google/gemma-3-1b-it"
 RANDOM_SEED = 2026
 DOC_SEP_TOKEN = "<|doc_sep|>"
 
+# N+B 總物理長度鎖定為 1000
 TOTAL_SEQ_LEN = 1000 
 TARGET_SEQUENCES = 5370000 
 OUTPUT_DIR = "./agiv2_stage1_1K"
@@ -20,51 +23,59 @@ RATIOS = {"short_text": 0.60, "short_code": 0.20, "short_qa": 0.10, "short_niah"
 
 DATA_SOURCES = {
     "short_text": {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-10BT", "split": "train"},
-    "short_code": {"path": "bigcode/starcoderdata", "name": "python", "split": "train"}, 
-    "short_qa":   {"path": "Open-Orca/OpenOrca", "name": None, "split": "train"},      
-    "short_niah": {"path": "m-a-p/Cosmopedia", "name": "v2", "split": "train"} 
+    "short_code": {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"}, 
+    "short_qa":   {"path": "Open-Orca/OpenOrca", "name": "default", "split": "train"},      
+    "short_niah": {"path": "HuggingFaceTB/smollm-corpus", "name": "cosmopedia-v2", "split": "train"} 
 }
 
+# 記憶體防護：每收集滿多少筆序列寫入一次硬碟
+WRITE_BATCH_SIZE = 10000 
+
 # =====================================================================
-# [ 執行邏輯區 ] 拓撲邊界感知生成器
+# [ 執行邏輯區 ] PyArrow 實體直寫引擎 (Absolute Deadlock Immunity)
 # =====================================================================
 
-class TopologicalAsymmetricBuilder:
+class PyArrowTopologicalBuilder:
     def __init__(self):
-        print("啟動量子疊加態資料引擎：AGIV2 (N -> N+B 語意拓撲完整版)")
+        print("啟動量子疊加態資料引擎：AGIV2 (PyArrow 底層直寫版 | 絕對防死結)")
         random.seed(RANDOM_SEED)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         
         if DOC_SEP_TOKEN not in self.tokenizer.get_vocab():
+            print(f"[警告] 詞表中未發現 {DOC_SEP_TOKEN}，將使用 <EOS> 替代。")
             self.doc_sep_id = self.tokenizer.eos_token_id
         else:
             self.doc_sep_id = self.tokenizer.convert_tokens_to_ids(DOC_SEP_TOKEN)
 
         self.total_seq_len = TOTAL_SEQ_LEN
         self.ratios = RATIOS
-        self.streams = {}
         
+        print("掛載開源異質資料流 (Streaming Parquet)...")
+        self.streams = {}
         for key, conf in DATA_SOURCES.items():
             kwargs = {"path": conf["path"], "split": conf["split"], "streaming": True}
             if conf["name"]: kwargs["name"] = conf["name"]
-            self.streams[key] = load_dataset(**kwargs).iter(batch_size=1)
+            # 建立單純的 Python Iterator
+            self.streams[key] = iter(load_dataset(**kwargs))
+
+        # 定義絕對的實體 Schema (寫入 Parquet 的資料表結構)
+        self.schema = pa.schema([
+            ('input_ids', pa.list_(pa.int32())),
+            ('n_split_index', pa.int32()),
+            ('b_length', pa.int32())
+        ])
 
     def _get_next_document(self) -> tuple[List[int], str]:
-        """剝除 SFT 格式，維持純淨知識流動"""
         source_type = random.choices(list(self.ratios.keys()), weights=list(self.ratios.values()), k=1)[0]
         try:
-            sample = next(self.streams[source_type])[0]
+            sample = next(self.streams[source_type])
             
             if source_type == "short_qa":
                 sys_prompt = sample.get("system_prompt", "")
                 question = sample.get("question", "")
                 response = sample.get("response", "")
-                text_parts = [p for p in (sys_prompt, question, response) if p.strip()]
+                text_parts = [p for p in (sys_prompt, question, response) if p and p.strip()]
                 text = "\n".join(text_parts)
-            elif source_type == "short_text":
-                text = sample.get("text", "")
-            elif source_type == "short_code":
-                text = sample.get("content", "") 
             else:
                 text = sample.get("text", sample.get("prompt", ""))
             
@@ -72,50 +83,44 @@ class TopologicalAsymmetricBuilder:
             
         except StopIteration:
             raise RuntimeError(f"[物理質量枯竭] 資料流 '{source_type}' 已完全耗盡。")
-        except Exception:
+        except Exception as e:
             return [], source_type
 
     def _find_topological_boundary(self, seq: List[int], target_n: int) -> int:
-        """
-        核心物理防線：確保 N 切割在完整的語意拓撲節點上。
-        搜尋優先級：1. 文檔分隔符 -> 2. 換行符號 -> 3. 句點。
-        """
-        # 1. 絕對物理斷點掃描：向外尋找最近的 doc_sep_id
         for offset in range(300):
             left_idx = target_n - offset
             right_idx = target_n + offset
-            
             if left_idx > 50 and seq[left_idx] == self.doc_sep_id:
-                return left_idx + 1  # 切在分隔符之後，N 包含完整文檔
+                return left_idx + 1  
             if right_idx < len(seq) - 50 and seq[right_idx] == self.doc_sep_id:
                 return right_idx + 1
 
-        # 2. 語意拓撲斷點掃描：解碼單一 Token 尋找換行或句點
-        # 為了效能，我們只在 target_n 附近的 150 個 Token 內尋找
         for offset in range(150):
             left_idx = target_n - offset
             if left_idx > 50:
                 token_str = self.tokenizer.decode([seq[left_idx]])
                 if '\n' in token_str or token_str.strip() in ['.', '?', '!', ';']:
-                    return left_idx + 1  # N 完整包含該句子/段落
-            
+                    return left_idx + 1  
             right_idx = target_n + offset
             if right_idx < len(seq) - 50:
                 token_str = self.tokenizer.decode([seq[right_idx]])
                 if '\n' in token_str or token_str.strip() in ['.', '?', '!', ';']:
                     return right_idx + 1
-        
-        # 3. 邊際妥協：若該區塊是超長無標點字串 (如 Base64)，退化為原始切割
         return target_n
 
-    def generate_packed_sequences(self) -> Iterator[Dict[str, Any]]:
-        """打包序列並注入經過校準的物理斷層線"""
+    def build_and_save(self):
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        output_file = os.path.join(OUTPUT_DIR, "agiv2_stage1_N_B.parquet")
+        print(f"準備將 {TARGET_SEQUENCES} 筆語意完整 N->N+B 教材，分批寫入實體磁區: {output_file}")
+        
         current_seq = []
         seq_count = 0
+        batch_data = []
         
-        pbar = tqdm(total=TARGET_SEQUENCES, desc="Packing Topological N->N+B Sequences")
-        
-        try:
+        # 啟動 PyArrow 的 Parquet 寫入引擎
+        with pq.ParquetWriter(output_file, self.schema) as writer:
+            pbar = tqdm(total=TARGET_SEQUENCES, desc="Direct Writing Parquet")
+            
             while seq_count < TARGET_SEQUENCES:
                 doc_tokens, _ = self._get_next_document()
                 if not doc_tokens: continue
@@ -132,33 +137,37 @@ class TopologicalAsymmetricBuilder:
                         doc_tokens = doc_tokens[remaining_space:]
                     
                     if len(current_seq) == self.total_seq_len:
-                        # 1. 先決定一個原始的目標 N (保持不同長度的震盪訓練)
-                        raw_target_n = random.randint(100, 900)
-                        
-                        # 2. 啟動外科手術：尋找最近的完美拓撲邊界
+                        raw_target_n = random.randint(300, 800)
                         calibrated_n = self._find_topological_boundary(current_seq, raw_target_n)
                         
-                        yield {
+                        # 收集完成的序列
+                        batch_data.append({
                             "input_ids": current_seq,
                             "n_split_index": calibrated_n, 
                             "b_length": self.total_seq_len - calibrated_n 
-                        }
+                        })
                         
                         current_seq = []
                         seq_count += 1
                         pbar.update(1)
                         
+                        # 記憶體防護：批次寫入硬碟
+                        if len(batch_data) >= WRITE_BATCH_SIZE:
+                            table = pa.Table.from_pylist(batch_data, schema=self.schema)
+                            writer.write_table(table)
+                            batch_data = [] # 清空記憶體
+                        
                         if seq_count >= TARGET_SEQUENCES:
                             break
-        finally:
             pbar.close()
+            
+            # 清空最後剩餘的緩衝區
+            if batch_data:
+                table = pa.Table.from_pylist(batch_data, schema=self.schema)
+                writer.write_table(table)
 
-    def build_and_save(self):
-        print(f"寫入 {TARGET_SEQUENCES} 筆語意完整 N->N+B 教材至 {OUTPUT_DIR}...")
-        dataset = Dataset.from_generator(self.generate_packed_sequences)
-        dataset.save_to_disk(OUTPUT_DIR)
-        print("✅ 物理隔絕與語意拓撲校準資料庫構建完成。")
+        print("✅ 第一性原理實踐：資料已無損寫入硬碟。再也沒有多執行緒死結。")
 
 if __name__ == "__main__":
-    builder = TopologicalAsymmetricBuilder()
+    builder = PyArrowTopologicalBuilder()
     builder.build_and_save()
