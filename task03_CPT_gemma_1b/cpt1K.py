@@ -1,3 +1,12 @@
+"""
+cpt1k.py — AGIV2 持續預訓練：第一階 (Beginner) 1K 數據引擎
+===========================================================
+第一性原理實踐：
+1. 視界鎖定：維持 N+B 物理長度 1000，專注於局部 SDPA 高精度映射。
+2. 絕對物理隔絕：徵用 Gemma 3 原生未使用的 <unused0> 作為文檔分隔牆，
+   完全避免詞表擴增導致的維度碰撞與硬體對齊(262144)失效。
+3. 拓撲觀測：超光速緩衝池與 O(1) 邊界尋路。
+"""
 import os
 import sys
 import random
@@ -13,7 +22,9 @@ from tqdm import tqdm
 # =====================================================================
 MODEL_ID = "google/gemma-3-1b-it"
 RANDOM_SEED = 2026
-DOC_SEP_TOKEN = "<|doc_sep|>"
+
+# 【核心突破】直接徵用原生空白符號，拋棄詞表擴充與整數寄生
+DOC_SEP_TOKEN = "<unused0>" 
 
 # N+B 總物理長度鎖定為 1000
 TOTAL_SEQ_LEN = 1000 
@@ -31,9 +42,7 @@ DATA_SOURCES = {
     "short_niah": {"path": "HuggingFaceTB/smollm-corpus", "name": "cosmopedia-v2", "split": "train"} 
 }
 
-# 記憶體防護：每收集滿 10,000 筆序列寫入一次硬碟
 WRITE_BATCH_SIZE = 10000 
-# 全局緩衝池水位線 (維持約 10 萬 Tokens 的儲備，極小化 I/O 中斷)
 BUFFER_WATERMARK = TOTAL_SEQ_LEN * 100 
 
 # =====================================================================
@@ -41,10 +50,6 @@ BUFFER_WATERMARK = TOTAL_SEQ_LEN * 100
 # =====================================================================
 
 def verify_existing_matrix() -> bool:
-    """
-    第一性原理：在啟動龐大算力前，先進行 O(1) 的宏觀狀態觀測。
-    若矩陣已達完美狀態，則直接凍結時間，節省邊際效用。
-    """
     output_file = os.path.join(OUTPUT_DIR, "agiv2_stage1_N_B.parquet")
     if not os.path.exists(output_file):
         print("🌌 觀測結果：實體磁區不存在，準備無中生有。")
@@ -52,7 +57,6 @@ def verify_existing_matrix() -> bool:
         
     print(f"🔍 偵測到既有實體磁區：{output_file}，啟動物理完整性驗證...")
     try:
-        # 使用 ParquetFile 讀取 metadata，速度極快且不佔記憶體
         pf = pq.ParquetFile(output_file)
         num_rows = pf.metadata.num_rows
         print(f"📊 當前序列數 (Rows): {num_rows} / 預期序列數: {TARGET_SEQUENCES}")
@@ -77,11 +81,9 @@ class HyperDriveTopologicalBuilder:
         random.seed(RANDOM_SEED)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         
-        if DOC_SEP_TOKEN not in self.tokenizer.get_vocab():
-            print(f"[警告] 詞表中未發現 {DOC_SEP_TOKEN}，將使用 <EOS> 替代。")
-            self.doc_sep_id = self.tokenizer.eos_token_id
-        else:
-            self.doc_sep_id = self.tokenizer.convert_tokens_to_ids(DOC_SEP_TOKEN)
+        # 取得原生預留 ID，絕對不會發生越界或改變矩陣大小
+        self.doc_sep_id = self.tokenizer.convert_tokens_to_ids(DOC_SEP_TOKEN)
+        print(f"🔗 實體定錨：已將 {DOC_SEP_TOKEN} (ID: {self.doc_sep_id}) 徵用為跨文檔物理隔絕牆。")
 
         self.total_seq_len = TOTAL_SEQ_LEN
         self.ratios = RATIOS
@@ -197,14 +199,10 @@ class HyperDriveTopologicalBuilder:
         print("✅ 算力完全釋放：超光速封裝完成，資料庫已定錨。")
 
 if __name__ == "__main__":
-    # 1. 執行觀測：檢查既有宇宙是否已經完美
     if verify_existing_matrix():
-        sys.exit(0)  # 完美則直接退出
+        sys.exit(0)
         
-    # 2. 啟動坍縮：執行超光速引擎重新生成
     builder = HyperDriveTopologicalBuilder()
     builder.build_and_save()
     
-    # 3. 絕對靜止協議：繞過 Python 的垃圾回收 (GC)，強制瞬間凍結進程。
-    # 這能完美避開 Hugging Face streaming datasets 在關閉時觸發的假性 Core Dumped 報錯。
     os._exit(0)
