@@ -1,4 +1,5 @@
 import os
+import sys
 import random
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,8 +20,10 @@ TOTAL_SEQ_LEN = 1000
 TARGET_SEQUENCES = 5370000 
 OUTPUT_DIR = "./agiv2_stage1_1K"
 
+# 三位一體的黃金配比
 RATIOS = {"short_text": 0.60, "short_code": 0.20, "short_qa": 0.10, "short_niah": 0.10}
 
+# 全線接入高質量 Parquet 原生矩陣
 DATA_SOURCES = {
     "short_text": {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-10BT", "split": "train"},
     "short_code": {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"}, 
@@ -28,16 +31,49 @@ DATA_SOURCES = {
     "short_niah": {"path": "HuggingFaceTB/smollm-corpus", "name": "cosmopedia-v2", "split": "train"} 
 }
 
-# 記憶體防護：每收集滿多少筆序列寫入一次硬碟
+# 記憶體防護：每收集滿 10,000 筆序列寫入一次硬碟
 WRITE_BATCH_SIZE = 10000 
+# 全局緩衝池水位線 (維持約 10 萬 Tokens 的儲備，極小化 I/O 中斷)
+BUFFER_WATERMARK = TOTAL_SEQ_LEN * 100 
 
 # =====================================================================
-# [ 執行邏輯區 ] PyArrow 實體直寫引擎 (Absolute Deadlock Immunity)
+# [ 觀測邏輯區 ] 實體拓撲檢驗 (Topology Verification)
 # =====================================================================
 
-class PyArrowTopologicalBuilder:
+def verify_existing_matrix() -> bool:
+    """
+    第一性原理：在啟動龐大算力前，先進行 O(1) 的宏觀狀態觀測。
+    若矩陣已達完美狀態，則直接凍結時間，節省邊際效用。
+    """
+    output_file = os.path.join(OUTPUT_DIR, "agiv2_stage1_N_B.parquet")
+    if not os.path.exists(output_file):
+        print("🌌 觀測結果：實體磁區不存在，準備無中生有。")
+        return False
+        
+    print(f"🔍 偵測到既有實體磁區：{output_file}，啟動物理完整性驗證...")
+    try:
+        # 使用 ParquetFile 讀取 metadata，速度極快且不佔記憶體
+        pf = pq.ParquetFile(output_file)
+        num_rows = pf.metadata.num_rows
+        print(f"📊 當前序列數 (Rows): {num_rows} / 預期序列數: {TARGET_SEQUENCES}")
+        
+        if num_rows == TARGET_SEQUENCES:
+            print("✅ 拓撲完整性 100%！實體矩陣已完美定錨，無須重複運算。")
+            return True
+        else:
+            print("⚠️ 序列數量不符，宇宙發生了坍縮。準備啟動超光速引擎進行覆寫...")
+            return False
+    except Exception as e:
+        print(f"⚠️ 磁區讀取失敗 ({e})，檔案內部結構已損毀。準備啟動引擎覆寫...")
+        return False
+
+# =====================================================================
+# [ 執行邏輯區 ] PyArrow 超光速直寫引擎
+# =====================================================================
+
+class HyperDriveTopologicalBuilder:
     def __init__(self):
-        print("啟動量子疊加態資料引擎：AGIV2 (PyArrow 底層直寫版 | 絕對防死結)")
+        print("🚀 啟動量子疊加態資料引擎：AGIV2 (超光速緩衝版 | O(1) 邊界尋路)")
         random.seed(RANDOM_SEED)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         
@@ -50,22 +86,29 @@ class PyArrowTopologicalBuilder:
         self.total_seq_len = TOTAL_SEQ_LEN
         self.ratios = RATIOS
         
+        print("預計算高維度拓撲邊界 Token IDs...")
+        self.boundary_ids = set()
+        boundary_chars = ['\n', '.', '?', '!', ';', '。', '！', '？', '；']
+        test_strings = boundary_chars + [f" {c}" for c in boundary_chars] + [f"a{c}" for c in boundary_chars]
+        for s in test_strings:
+            tokens = self.tokenizer.encode(s, add_special_tokens=False)
+            if tokens:
+                self.boundary_ids.add(tokens[-1]) 
+
         print("掛載開源異質資料流 (Streaming Parquet)...")
         self.streams = {}
         for key, conf in DATA_SOURCES.items():
             kwargs = {"path": conf["path"], "split": conf["split"], "streaming": True}
             if conf["name"]: kwargs["name"] = conf["name"]
-            # 建立單純的 Python Iterator
             self.streams[key] = iter(load_dataset(**kwargs))
 
-        # 定義絕對的實體 Schema (寫入 Parquet 的資料表結構)
         self.schema = pa.schema([
             ('input_ids', pa.list_(pa.int32())),
             ('n_split_index', pa.int32()),
             ('b_length', pa.int32())
         ])
 
-    def _get_next_document(self) -> tuple[List[int], str]:
+    def _get_next_document_tokens(self) -> List[int]:
         source_type = random.choices(list(self.ratios.keys()), weights=list(self.ratios.values()), k=1)[0]
         try:
             sample = next(self.streams[source_type])
@@ -79,12 +122,12 @@ class PyArrowTopologicalBuilder:
             else:
                 text = sample.get("text", sample.get("prompt", ""))
             
-            return self.tokenizer.encode(text, add_special_tokens=False), source_type
+            return self.tokenizer.encode(text, add_special_tokens=False)
             
         except StopIteration:
             raise RuntimeError(f"[物理質量枯竭] 資料流 '{source_type}' 已完全耗盡。")
-        except Exception as e:
-            return [], source_type
+        except Exception:
+            return []
 
     def _find_topological_boundary(self, seq: List[int], target_n: int) -> int:
         for offset in range(300):
@@ -97,77 +140,71 @@ class PyArrowTopologicalBuilder:
 
         for offset in range(150):
             left_idx = target_n - offset
-            if left_idx > 50:
-                token_str = self.tokenizer.decode([seq[left_idx]])
-                if '\n' in token_str or token_str.strip() in ['.', '?', '!', ';']:
-                    return left_idx + 1  
+            if left_idx > 50 and seq[left_idx] in self.boundary_ids:
+                return left_idx + 1  
+            
             right_idx = target_n + offset
-            if right_idx < len(seq) - 50:
-                token_str = self.tokenizer.decode([seq[right_idx]])
-                if '\n' in token_str or token_str.strip() in ['.', '?', '!', ';']:
-                    return right_idx + 1
+            if right_idx < len(seq) - 50 and seq[right_idx] in self.boundary_ids:
+                return right_idx + 1
+                
         return target_n
 
     def build_and_save(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         output_file = os.path.join(OUTPUT_DIR, "agiv2_stage1_N_B.parquet")
-        print(f"準備將 {TARGET_SEQUENCES} 筆語意完整 N->N+B 教材，分批寫入實體磁區: {output_file}")
+        print(f"準備將 {TARGET_SEQUENCES} 筆語意完整 N->N+B 教材，光速寫入實體磁區: {output_file}")
         
-        current_seq = []
         seq_count = 0
         batch_data = []
+        global_token_buffer = [] 
         
-        # 啟動 PyArrow 的 Parquet 寫入引擎
         with pq.ParquetWriter(output_file, self.schema) as writer:
-            pbar = tqdm(total=TARGET_SEQUENCES, desc="Direct Writing Parquet")
+            pbar = tqdm(total=TARGET_SEQUENCES, desc="HyperDrive Writing")
             
             while seq_count < TARGET_SEQUENCES:
-                doc_tokens, _ = self._get_next_document()
-                if not doc_tokens: continue
+                while len(global_token_buffer) < BUFFER_WATERMARK:
+                    doc_tokens = self._get_next_document_tokens()
+                    if doc_tokens:
+                        global_token_buffer.extend(doc_tokens)
+                        global_token_buffer.append(self.doc_sep_id)
                 
-                doc_tokens.append(self.doc_sep_id)
+                current_seq = global_token_buffer[:self.total_seq_len]
+                global_token_buffer = global_token_buffer[self.total_seq_len:]
                 
-                while doc_tokens:
-                    remaining_space = self.total_seq_len - len(current_seq)
-                    if len(doc_tokens) <= remaining_space:
-                        current_seq.extend(doc_tokens)
-                        doc_tokens = []
-                    else:
-                        current_seq.extend(doc_tokens[:remaining_space])
-                        doc_tokens = doc_tokens[remaining_space:]
-                    
-                    if len(current_seq) == self.total_seq_len:
-                        raw_target_n = random.randint(300, 800)
-                        calibrated_n = self._find_topological_boundary(current_seq, raw_target_n)
-                        
-                        # 收集完成的序列
-                        batch_data.append({
-                            "input_ids": current_seq,
-                            "n_split_index": calibrated_n, 
-                            "b_length": self.total_seq_len - calibrated_n 
-                        })
-                        
-                        current_seq = []
-                        seq_count += 1
-                        pbar.update(1)
-                        
-                        # 記憶體防護：批次寫入硬碟
-                        if len(batch_data) >= WRITE_BATCH_SIZE:
-                            table = pa.Table.from_pylist(batch_data, schema=self.schema)
-                            writer.write_table(table)
-                            batch_data = [] # 清空記憶體
-                        
-                        if seq_count >= TARGET_SEQUENCES:
-                            break
+                raw_target_n = random.randint(300, 800)
+                calibrated_n = self._find_topological_boundary(current_seq, raw_target_n)
+                
+                batch_data.append({
+                    "input_ids": current_seq,
+                    "n_split_index": calibrated_n, 
+                    "b_length": self.total_seq_len - calibrated_n 
+                })
+                
+                seq_count += 1
+                pbar.update(1)
+                
+                if len(batch_data) >= WRITE_BATCH_SIZE:
+                    table = pa.Table.from_pylist(batch_data, schema=self.schema)
+                    writer.write_table(table)
+                    batch_data = []
+            
             pbar.close()
             
-            # 清空最後剩餘的緩衝區
             if batch_data:
                 table = pa.Table.from_pylist(batch_data, schema=self.schema)
                 writer.write_table(table)
 
-        print("✅ 第一性原理實踐：資料已無損寫入硬碟。再也沒有多執行緒死結。")
+        print("✅ 算力完全釋放：超光速封裝完成，資料庫已定錨。")
 
 if __name__ == "__main__":
-    builder = PyArrowTopologicalBuilder()
+    # 1. 執行觀測：檢查既有宇宙是否已經完美
+    if verify_existing_matrix():
+        sys.exit(0)  # 完美則直接退出
+        
+    # 2. 啟動坍縮：執行超光速引擎重新生成
+    builder = HyperDriveTopologicalBuilder()
     builder.build_and_save()
+    
+    # 3. 絕對靜止協議：繞過 Python 的垃圾回收 (GC)，強制瞬間凍結進程。
+    # 這能完美避開 Hugging Face streaming datasets 在關閉時觸發的假性 Core Dumped 報錯。
+    os._exit(0)
