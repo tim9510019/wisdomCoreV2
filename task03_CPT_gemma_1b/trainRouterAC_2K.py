@@ -33,20 +33,19 @@ set_seed(2026)
 # 0. 訓練配置核心參數區 (方便統一修改)
 # ==========================================
 MODEL_ID = "google/gemma-3-1b-it"
-SAVE_DIR = "./agiv2_zerogate_ac_checkpoints_2K"
-LOG_PATH = "./zerogate_32k_ac_2k_log.csv"
-BEST_1K_PATH = "./agiv2_zerogate_ac_checkpoints_1K/best_model.pth"
+SAVE_DIR = "./agiv2_zerogate_ac_checkpoints_1K"
+LOG_PATH = "./zerogate_32k_ac_1k_log.csv"
 
 # 🚀 訓練步數與排程 (使用者自訂)
-MAX_STEPS = 2000                   # 🏆 指定要訓練的總步數 (取代 num_train_epochs)
+MAX_STEPS = 2000                  # 🏆 指定要訓練的總步數 (取代 num_train_epochs)
 WARMUP_STEPS = 200                 # 🌟 改用 WARMUP_STEPS 避免 deprecated 警告 (約 10%)
 EVAL_STEPS = 50                    # 多少步進行一次評估
 SAVE_STEPS = 10                    # 多少步保存一次 Checkpoint
 SAVE_TOTAL_LIMIT = 2               # 最大保留 Checkpoint 數量
 LOGGING_STEPS = 1                  # 多少步記錄一次 Log
 
-# 🚀 模型與資料參數
-TARGET_LENGTHS = [2048]            # 訓練資料基準長度
+# 🚀 模型與資料參數ㄡ
+TARGET_LENGTHS = [1024]            # 訓練資料基準長度
 B_SIZE = 512                       # 隔離預測區塊 (B Block) 尺寸
 NUM_TRAIN_SAMPLES = 200000         # 訓練集動態生成池大小
 NUM_EVAL_SAMPLES = 50              # 評估集動態生成總數
@@ -224,14 +223,6 @@ def main():
     base = AGIV2G(vocab_size=262144, D=1152, C=256, hidden_dim=6912, num_blocks=26)
     base = transplant_and_freeze(MODEL_ID, base)
     model = AGIV2GForCausalLM(base, use_gc=True)
-    
-    # 🌟 載入 1K 階段的 best_model 權重
-    if os.path.exists(BEST_1K_PATH):
-        print(f"\n🔄 成功尋獲 1K 階段之最佳權重，正在載入以進行 2K 延伸訓練: {BEST_1K_PATH}")
-        state_dict = torch.load(BEST_1K_PATH, map_location="cpu")
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        print(f"\n⚠️ 找不到 1K 權重檔案 {BEST_1K_PATH}，將從頭開始訓練！")
     
     unlock_keywords = ["gate_fft", "gate_mem", "omegas", "mlp_H", "fft_norm", "Q_mem", "W_k_mem", "W_v_mem", "mem_norm", "W_q_cross", "o_proj_cross"]
     for name, param in model.named_parameters():

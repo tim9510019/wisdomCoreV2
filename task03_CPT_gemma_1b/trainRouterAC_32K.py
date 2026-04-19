@@ -38,8 +38,8 @@ LOG_PATH = "./zerogate_32k_ac_32k_log.csv"
 BEST_16K_PATH = "./agiv2_zerogate_ac_checkpoints_16K/best_model.pth"
 
 # 🚀 訓練步數與排程 (使用者自訂)
-MAX_STEPS = 2000                   # 🏆 指定要訓練的總步數 (取代 num_train_epochs)
-WARMUP_STEPS = 200                 # 🌟 改用 WARMUP_STEPS 避免 deprecated 警告 (約 10%)
+MAX_STEPS = 500                   # 🏆 指定要訓練的總步數 (取代 num_train_epochs)
+WARMUP_STEPS = 100                 # 🌟 改用 WARMUP_STEPS 避免 deprecated 警告 (約 40%)
 EVAL_STEPS = 50                    # 多少步進行一次評估
 SAVE_STEPS = 10                    # 多少步保存一次 Checkpoint
 SAVE_TOTAL_LIMIT = 2               # 最大保留 Checkpoint 數量
@@ -52,7 +52,7 @@ NUM_TRAIN_SAMPLES = 200000         # 訓練集動態生成池大小
 NUM_EVAL_SAMPLES = 50              # 評估集動態生成總數
 BATCH_SIZE_PER_DEVICE = 1          # 單卡 Batch Size
 GRAD_ACCUMULATION_STEPS = 32       # 梯度累積步數
-LEARNING_RATE = 3e-4               # 學習率
+LEARNING_RATE = 1e-4               # 學習率
 
 
 # ==========================================
