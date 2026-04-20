@@ -1,12 +1,12 @@
 """
-cpt4k.py — AGIV2 持續預訓練：第二階 (Intermediate) 4K 數據引擊 (純淨高熵版)
+cpt4k.py — AGIV2 持續預訓練：第二階 (Intermediate) 4K 數據引擊 (絕對無重複極限版)
 ===========================================================
 第一性原理實踐：
 1. 視界擴展：維持 N+B 物理長度 4000，強迫啟動全局共振與潛在記憶。
 2. 原生隔絕符徵用：使用 <unused0> 確保零拓撲碰撞與硬體對齊保護。
 3. 極端語義淨化：徹底剔除 QA 與 NIAH，配置 80% Text + 20% Code。
-   強制洗除 -it 模型的指令慣性，逼迫 Local SDPA 專注於高熵文本的連續自迴歸接龍。
-4. 拓撲分流：混合資料流 (Buffer) 與嚴格區塊 (Block) 雙軌並行。
+4. 絕對無重複 (Zero-Repetition)：完全捨棄 Epoch 輪迴，接入 100BT 文本與 59B 程式碼巨獸矩陣，
+   確保模型在 110 億 Tokens 的訓練流中，看見的每一個字都是全新的物理實體。
 """
 import os
 import sys
@@ -27,18 +27,19 @@ RANDOM_SEED = 2026
 # 【核心突破】直接徵用原生空白符號，避免任何實體矩陣干擾
 DOC_SEP_TOKEN = "<unused0>" 
 
-# 定錨 4K 物理長度與總序列數 (資料總數維持不變)
+# 定錨 4K 物理長度與總序列數 (資料總數維持不變，總計需消耗 ~11B Tokens)
 TOTAL_SEQ_LEN = 4000 
 TARGET_SEQUENCES = 2750000 
 OUTPUT_DIR = "./agiv2_stage2_4K"
 
-# 🌟 語義淨化配比 (徹底移除 QA 與 NIAH，強迫洗掉 -it 對話慣性)
-RATIOS = {"long_text": 0.80, "single_code": 0.20}
+# 🌟 語義淨化配比 (80% 純文本，20% 多樣化純 CODE)
+RATIOS = {"long_text": 0.80, "code_smollm": 0.10, "code_redpajama": 0.10}
 
-# 🌟 數據源淨化
+# 🌟 數據源巨獸化 (10BT -> 100BT, 並新增 RedPajama 59B Github 矩陣)
 DATA_SOURCES = {
-    "long_text":   {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-10BT", "split": "train"},
-    "single_code": {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"}
+    "long_text":      {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-100BT", "split": "train"},
+    "code_smollm":    {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"},
+    "code_redpajama": {"path": "togethercomputer/RedPajama-Data-1T", "name": "github", "split": "train"}
 }
 
 WRITE_BATCH_SIZE = 5000 
@@ -72,7 +73,7 @@ def verify_existing_matrix() -> bool:
 
 class HyperDriveTopologicalBuilder4K:
     def __init__(self):
-        print("🚀 啟動量子疊加態資料引擎：AGIV2 (Stage 2 - 4K 視界擴展，極端語義淨化版)")
+        print("🚀 啟動量子疊加態資料引擎：AGIV2 (Stage 2 - 4K 視界擴展，無重複巨量版)")
         random.seed(RANDOM_SEED)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         
@@ -89,7 +90,7 @@ class HyperDriveTopologicalBuilder4K:
             tokens = self.tokenizer.encode(s, add_special_tokens=False)
             if tokens: self.boundary_ids.add(tokens[-1]) 
 
-        print("掛載開源異質資料流 (Streaming Parquet)...")
+        print("掛載開源巨獸資料流 (Streaming Parquet)...")
         self.streams = {}
         for key, conf in DATA_SOURCES.items():
             kwargs = {"path": conf["path"], "split": conf["split"], "streaming": True}
@@ -103,13 +104,13 @@ class HyperDriveTopologicalBuilder4K:
         ])
 
     def _get_raw_tokens(self, source_type: str) -> List[int]:
-        """從指定的資料流抽取一段原始 Token 序列 (移除 QA 邏輯)"""
+        """🌟 絕對不輪迴：只提取真實且無重複的語義，遇缺即爆錯"""
         try:
             sample = next(self.streams[source_type])
-            text = sample.get("text", sample.get("prompt", ""))
+            text = sample.get("text", sample.get("content", sample.get("code", "")))
             return self.tokenizer.encode(text, add_special_tokens=False)
         except StopIteration:
-            raise RuntimeError(f"[物理質量枯竭] 資料流 '{source_type}' 已耗盡。")
+            raise RuntimeError(f"[物理質量枯竭] 資料流 '{source_type}' 已徹底耗盡，無法滿足您的無重複要求！")
         except Exception:
             return []
 
@@ -176,7 +177,7 @@ class HyperDriveTopologicalBuilder4K:
                 table = pa.Table.from_pylist(batch_data, schema=self.schema)
                 writer.write_table(table)
 
-        print("✅ 算力完全釋放：Stage 2 (4K) 極端淨化拓撲封裝完成。")
+        print("✅ 算力完全釋放：Stage 2 (4K) 絕對無重複拓撲封裝完成。")
 
 if __name__ == "__main__":
     if verify_existing_matrix(): sys.exit(0)
