@@ -31,7 +31,7 @@ LOG_PATH = "./agiv2_cpt_1k_log.csv"
 
 BEST_ROUTER_32K_PATH = "./agiv2_zerogate_ac_checkpoints_32K/best_model.pth"
 
-MAX_STEPS = 167818                   
+MAX_STEPS = 167812                   
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
 SAVE_STEPS = 100                   

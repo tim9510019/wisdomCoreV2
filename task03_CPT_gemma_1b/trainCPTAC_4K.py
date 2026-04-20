@@ -46,7 +46,7 @@ LOG_PATH = "./agiv2_cpt_4k_log.csv"
 BEST_MODEL_1K_PATH = "./agiv2_cpt_checkpoints_1K/best_cpt_model.pth"
 
 # ⚙️ 4K 階段訓練超參數 (Stage 2: Plateau)
-MAX_STEPS = 5000                   
+MAX_STEPS = 85937                   
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
 SAVE_STEPS = 100                   
