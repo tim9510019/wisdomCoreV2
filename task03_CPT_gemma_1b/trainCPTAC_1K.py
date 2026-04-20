@@ -1,14 +1,4 @@
-"""
-trainCPTAC_1K.py — AGIV2 持續預訓練終極引擎 (N -> N+B 物理隔離直讀版)
-===========================================================
-第一性原理實踐：
-1. 降維直讀：捨棄 load_from_disk 的高階封裝，直接以 Parquet 原生格式掛載實體矩陣，邊際效用最大化。
-2. 實體斷層隔離：DataCollator 根據 n_split_index 將 N 的 Labels 設為 -100，
-   確保梯度僅從 B (嚴格預測區) 流回，徹底封殺盲目試錯。
-3. 外科手術解凍：精準解鎖 Routing + LayerNorm，凍結 LM Head 與 Attn Proj。
-4. 跨階段繼承：自動載入 32K Router 階段的 Best Model，繼承已喚醒的路由能力。
-5. 驗證集極小化：精準切割 50 筆絕對獨立序列，確保 Eval 階段不浪費任何算力。
-"""
+# trainCPTAC_1K.py — AGIV2 持續預訓練終極引擎 (N -> N+B 物理隔離直讀版)
 import os
 import sys
 import csv
@@ -18,11 +8,9 @@ from transformers import AutoTokenizer, TrainingArguments, Trainer, set_seed, Tr
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_dataset 
 
-# 確保外部依賴路徑暢通
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# 算力池綁定
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -31,26 +19,23 @@ from AGIV2GAC import AGIV2G
 from utils import AGIV2GForCausalLM, transplant_and_freeze
 
 RANDOM_SEED = 2026
-
 set_seed(RANDOM_SEED)
 
 # ==========================================
-# [ 全局配置區 ] 能量分佈與物理參數
+# [ 全局配置區 ] 
 # ==========================================
 MODEL_ID = "google/gemma-3-1b-it"
 DATASET_DIR = "./agiv2_stage1_1K"            
 SAVE_DIR = "./agiv2_cpt_checkpoints_1K"
 LOG_PATH = "./agiv2_cpt_1k_log.csv"
 
-# 🌟 跨階段拓撲繼承：指向 32K 路由對齊階段的最佳權重
 BEST_ROUTER_32K_PATH = "./agiv2_zerogate_ac_checkpoints_32K/best_model.pth"
 
-# 依據 CPT 階段量化指標設定
 MAX_STEPS = 5000                   
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
 SAVE_STEPS = 100                   
-SAVE_TOTAL_LIMIT = 3               
+SAVE_TOTAL_LIMIT = 2               
 LOGGING_STEPS = 1                  
 
 BATCH_SIZE_PER_DEVICE = 2          
@@ -58,34 +43,36 @@ GRAD_ACCUMULATION_STEPS = 16
 LEARNING_RATE = 1e-4               
 
 # ==========================================
-# [ 監控維度 ] 具備歷史回溯能力的量子觀測器
+# [ 統一對齊的量子監控器 (CPT 版) ]
 # ==========================================
 class QuantumCPTMonitor(TrainerCallback):
     def __init__(self, path=LOG_PATH, save_dir=SAVE_DIR):
         self.path = path
         self.save_dir = save_dir
-        self.best_loss = float('inf')
+        self.best_eval_loss = float('inf') # 🌟 修正：從追蹤 loss 改為嚴格追蹤 eval_loss
         os.makedirs(self.save_dir, exist_ok=True)
         
+        # 🌟 歷史回溯：邏輯對齊 Router，精準掃描 eval_loss (第三欄)
         if os.path.exists(self.path):
             try:
                 with open(self.path, 'r', encoding='utf-8') as f:
                     reader = csv.reader(f)
                     next(reader, None) 
                     for row in reader:
-                        if len(row) > 1 and row[1].strip(): 
+                        if len(row) > 2 and row[2].strip(): 
                             try:
-                                val = float(row[1])
-                                if val < self.best_loss:
-                                    self.best_loss = val
+                                val = float(row[2])
+                                if val < self.best_eval_loss:
+                                    self.best_eval_loss = val
                             except ValueError: pass
-                if self.best_loss != float('inf'):
-                    print(f"\n📈 [Monitor] 時間線同步成功。當前最佳 Training Loss 基準: {self.best_loss:.4f}")
+                if self.best_eval_loss != float('inf'):
+                    print(f"\n📈 [Monitor] 時間線同步成功。當前最佳 Eval Loss 基準: {self.best_eval_loss:.4f}")
             except Exception as e:
                 print(f"\n⚠️ [Monitor] 讀取歷史紀錄失敗: {e}")
         else:
+            # 🌟 修正 CSV 標頭，加入 eval_loss
             with open(self.path, 'w', newline='') as f:
-                csv.writer(f).writerow(['step', 'loss', 'fft_max', 'mem_max', 'time'])
+                csv.writer(f).writerow(['step', 'loss', 'eval_loss', 'fft_max', 'mem_max', 'time'])
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if logs:
@@ -101,17 +88,25 @@ class QuantumCPTMonitor(TrainerCallback):
                     logs["fft_max"] = round(max_fft, 6)
                     logs["mem_max"] = round(max_mem, 6)
             
-            current_loss = logs.get("loss", None)
+            # 🌟 單純負責寫入，拔除在此處存檔的危險邏輯
             with open(self.path, 'a', newline='') as f:
-                csv.writer(f).writerow([state.global_step, current_loss, max_fft, max_mem, time.ctime()])
+                csv.writer(f).writerow([state.global_step, logs.get("loss", ""), logs.get("eval_loss", ""), max_fft, max_mem, time.ctime()])
                 
-            if current_loss and current_loss < self.best_loss:
-                self.best_loss = current_loss
-                if model is not None and state.global_step % (SAVE_STEPS // 2) == 0:
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        """🌟 嚴格保存最佳模型 (與 Router 邏輯完全一致，有突破才存檔)"""
+        if metrics and "eval_loss" in metrics:
+            current_eval_loss = metrics["eval_loss"]
+            if current_eval_loss < self.best_eval_loss:
+                old_best = self.best_eval_loss
+                self.best_eval_loss = current_eval_loss
+                model = kwargs.get('model', None)
+                if model is not None:
                     best_model_path = os.path.join(self.save_dir, "best_cpt_model.pth")
                     raw_model = model.module if hasattr(model, 'module') else model
                     torch.save(raw_model.state_dict(), best_model_path)
-                    print(f"\n[Monitor] 🌟 結構極化收斂 ({current_loss:.4f})，實體權重已儲存。")
+                    print(f"\n[Monitor] 🌟 結構極化收斂，發現更佳權重 ({old_best:.4f} -> {current_eval_loss:.4f})，已儲存至 {best_model_path}")
+            else:
+                print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})，跳過保存。")
 
 # ==========================================
 # [ 物理隔離 ] N -> N+B 絕對斷層拼接器
@@ -131,12 +126,10 @@ class CPTDataCollator:
             n_split = f["n_split_index"]
             pad_len = max_len - len(seq)
             
-            # 填補 Input
             padded_seq = seq + [self.pad_token_id] * pad_len
             batch_input_ids.append(padded_seq)
             
-            # 絕對物理隔離：確保 n_split 之前的梯度為 0 (設為 -100)
-            n_split = min(n_split, len(seq)) # 防禦性邊界檢查
+            n_split = min(n_split, len(seq)) 
             labels = [-100] * n_split + seq[n_split:] + [-100] * pad_len
             batch_labels.append(labels)
             
@@ -151,11 +144,9 @@ class CPTDataCollator:
 def main():
     print("\n🚀 啟動 AGIV2 CPT 第一階訓練矩陣 (N -> N+B 物理隔離直讀版)...")
     
-    # 1. 初始化基礎元件
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
-    # 2. 載入超光速資料庫 (降維直接讀取 Parquet)
     parquet_file = os.path.join(DATASET_DIR, "agiv2_stage1_N_B.parquet")
     if not os.path.exists(parquet_file):
         raise FileNotFoundError(f"找不到實體矩陣 {parquet_file}，請先執行 cpt1K.py 產生資料。")
@@ -163,23 +154,15 @@ def main():
     print(f"📦 成功鎖定實體磁區，直接掛載 Parquet 拓撲: {parquet_file}")
     dataset_dict = load_dataset("parquet", data_files=parquet_file)
     
-    # =========================================================================
-    # 🌟 [ 驗證集極小化 ] 
-    # 第一性原理：保留算力給主引擎。從原生結構中無放回抽出絕對獨立的 50 筆資料作為 Eval。
-    # =========================================================================
     dataset = dataset_dict['train'].train_test_split(test_size=50, seed=RANDOM_SEED)
     train_ds = dataset['train']
     eval_ds = dataset['test']
     print(f"✅ 資料映射與絕對隔離完成！訓練集: {len(train_ds):,} 筆 | 獨立驗證集: {len(eval_ds)} 筆")
 
-    # 3. 模型拓撲對齊
     base = AGIV2G(vocab_size=262144, D=1152, C=256, hidden_dim=6912, num_blocks=26)
     base = transplant_and_freeze(MODEL_ID, base)
     model = AGIV2GForCausalLM(base, use_gc=True)
     
-    # =========================================================================
-    # 🌟 [ 跨階段拓撲繼承 ] 
-    # =========================================================================
     if os.path.exists(BEST_ROUTER_32K_PATH):
         print(f"\n🔄 成功尋獲 32K 階段之最佳路由權重，正在載入以進行 CPT 結構穩固訓練: {BEST_ROUTER_32K_PATH}")
         state_dict = torch.load(BEST_ROUTER_32K_PATH, map_location="cpu")
@@ -188,9 +171,6 @@ def main():
     else:
         print(f"\n⚠️ 找不到 32K 路由權重檔案 {BEST_ROUTER_32K_PATH}，將僅依賴原始 Gemma 權重從頭開始 CPT！")
 
-    # =========================================================================
-    # [ 外科手術解凍矩陣 ] (Surgical Unfreezing Matrix)
-    # =========================================================================
     routing_keys = ["gate_fft", "gate_mem", "omegas", "mlp_H", "Q_mem", "W_k_mem", "W_v_mem", "W_q_cross", "o_proj_cross"]
     norm_keys = ["norm", "input_layernorm", "post_attention_layernorm"] 
     frozen_keys = ["lm_head", "o_proj"] 
@@ -210,7 +190,6 @@ def main():
 
     model = model.cuda().to(torch.bfloat16)
 
-    # 4. 訓練能量配置
     args = TrainingArguments(
         output_dir=SAVE_DIR,
         max_steps=MAX_STEPS,                    
@@ -231,7 +210,6 @@ def main():
         report_to="none"
     )
 
-    # 5. 啟動框架
     trainer = Trainer(
         model=model,
         args=args,
@@ -249,7 +227,6 @@ def main():
 
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
-    # 6. 最終坍縮
     final_path = os.path.join(SAVE_DIR, "final_agiv2_cpt_1k.pth")
     torch.save(model.state_dict() if not hasattr(model, 'module') else model.module.state_dict(), final_path)
     print(f"🎉 第一階 CPT 拓撲對齊完成！最終權重已沉澱至 {final_path}")
