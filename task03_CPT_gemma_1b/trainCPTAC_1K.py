@@ -105,7 +105,7 @@ class QuantumCPTMonitor(TrainerCallback):
                 print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})，跳過保存。")
 
 # ==========================================
-# [ 物理隔離 ] N -> N+B 絕對斷層拼接器 (防作弊修正版)
+# [ 物理隔離 ] N -> N+B 絕對斷層拼接器 (非對稱解耦版)
 # ==========================================
 class CPTDataCollator:
     def __init__(self, pad_token_id):
@@ -114,6 +114,7 @@ class CPTDataCollator:
     def __call__(self, features):
         batch_input_ids = []
         batch_labels = []
+        batch_n_splits = []
         
         max_len = max(len(f["input_ids"]) for f in features)
         
@@ -122,22 +123,24 @@ class CPTDataCollator:
             n_split = f["n_split_index"]
             n_split = min(n_split, len(seq)) 
             
-            # 🌟 核心防禦機制：物理抹除 B 區塊的輸入，防止全局路由 (FFT/Mem) 看見未來
-            # 輸入矩陣中，n_split 之後的內容全部被強制替換為 PAD
-            isolated_seq = seq[:n_split] + [self.pad_token_id] * (len(seq) - n_split)
-            
+            # 🌟 核心修改：非對稱解耦 (Asymmetric Decoupling)
+            # 釋放真實訊號，不抹除 B 區塊，保留完整 [N, B] 讓 Local SDPA 執行 AR 接龍
+            # M_global 的 NAR 物理隔斷，將由穿透下去的 n_split_index 在模型內部執行
             pad_len = max_len - len(seq)
-            # 對齊 Batch 內的最大長度
-            padded_input = isolated_seq + [self.pad_token_id] * pad_len
+            padded_input = seq + [self.pad_token_id] * pad_len
             batch_input_ids.append(padded_input)
             
-            # 🌟 預測目標不變：前 N 個不計算 Loss (-100)，只預測 B 區塊的真實答案
+            # 🌟 預測目標不變：前 N 個不計算 Loss (-100)，只針對 B 區塊計算 AR 預測的 Loss
             labels = [-100] * n_split + seq[n_split:] + [-100] * pad_len
             batch_labels.append(labels)
             
+            # 🌟 收集切分點，準備穿透至底層
+            batch_n_splits.append(n_split)
+            
         return {
             "input_ids": torch.tensor(batch_input_ids, dtype=torch.long),
-            "labels": torch.tensor(batch_labels, dtype=torch.long)
+            "labels": torch.tensor(batch_labels, dtype=torch.long),
+            "n_split_index": torch.tensor(batch_n_splits, dtype=torch.long) # 🌟 穿透參數，傳遞給底層進行物理截斷
         }
 
 # ==========================================

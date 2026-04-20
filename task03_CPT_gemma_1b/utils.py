@@ -136,6 +136,9 @@ class AGIV2GForCausalLM(nn.Module):
         self.use_gc = use_gc
 
     def forward(self, input_ids, labels=None, **kwargs):
+        # 🌟 攔截由 CPTDataCollator 傳遞下來的物理隔離邊界 (n_split_index)
+        n_split_index = kwargs.get("n_split_index", None)
+
         hidden_states = self.base_model.embedding(input_ids)
         # 保留 Gemma 架構必須的縮放
         hidden_states = hidden_states * math.sqrt(self.base_model.D)
@@ -144,10 +147,10 @@ class AGIV2GForCausalLM(nn.Module):
             shift_size = (block.C // 2) if (i % 2 != 0) else 0
             if self.training and self.use_gc:
                 hidden_states = checkpoint.checkpoint(
-                    block, hidden_states, shift_size, use_reentrant=False
+                    block, hidden_states, shift_size, use_reentrant=False, n_split_index=n_split_index # 🌟 穿透傳遞給底層 AGIBlock
                 )
             else:
-                hidden_states = block(hidden_states, shift_size=shift_size)
+                hidden_states = block(hidden_states, shift_size=shift_size, n_split_index=n_split_index) # 🌟 穿透傳遞給底層 AGIBlock
                 
         hidden_states = self.base_model.final_norm(hidden_states)
         

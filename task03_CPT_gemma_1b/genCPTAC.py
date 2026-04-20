@@ -1,10 +1,10 @@
 """
-genCPTAC.py — AGIV2 CPT 階段解碼 (平行映射防洩漏對齊版)
+genCPTAC.py — AGIV2 CPT 階段解碼 (雙擎異步融合：NAR 宏觀鎖定 + AR 微觀接龍版)
 =========================================================================
 核心機制：
-1. 認知對齊：訓練期已嚴格執行 B 區塊 PAD 抹除，推論時恢復單次 Forward 平行拔取 (Single-Shot Extraction)。
-2. 權重對齊：使用 strict=True 確保 CPT 階段解凍的 Routing 與 LayerNorm 完美載入。
-3. 輸出防護：精準提取 CausalLMOutput 中的 logits，避免 dict 存取錯誤。
+1. 認知對齊：訓練期已採用非對稱解耦，推論時必須採用 AR (自迴歸) 迴圈來釋放 Local SDPA 的文法能力。
+2. 宏觀鎖定：每一次前向傳播皆強制傳入 n_split_index = N，確保 M_global (NAR引擎) 絕對不會被新生成的字元污染。
+3. 權重對齊：使用 strict=True 確保 CPT 階段解凍的 Routing 與 LayerNorm 完美載入。
 """
 import os
 import sys
@@ -63,58 +63,65 @@ def check_routing_gates(model):
         if hasattr(block, 'gate_fft'):
             fft_val = block.gate_fft.item()
             mem_val = block.gate_mem.item()
-            # 重新訓練後，這裡應呈現健康的極化分佈，而非全作弊的 +1.0000
             print(f"  ▶ Block {i:02d} | gate_fft: {fft_val:+.4f} | gate_mem: {mem_val:+.4f}")
     print("-" * 50)
 
 @torch.no_grad()
-def generate_cpt_parallel(model, tokenizer, prompt_ids, expected_b_size, max_display=64):
+def generate_cpt_autoregressive(model, tokenizer, prompt_ids, expected_b_size, max_display=64):
     """
-    並行映射解碼：單次 Forward 提取整個 B 區塊。
+    雙擎異步解碼：M_global 鎖死於 N，Local SDPA 逐字 AR 生成。
     """
-    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
     N_len = len(prompt_ids)
     
-    # [物理隔離重現] 構造輸入：N (已知) + B (全部填 PAD，對齊訓練期的防作弊機制)
-    input_ids = prompt_ids + [pad_id] * expected_b_size
-    current_ids = torch.tensor(input_ids, dtype=torch.long, device=DEVICE).unsqueeze(0)
+    # 初始輸入：只有 N 區塊 (沒有任何 PAD 污染)
+    current_ids = torch.tensor([prompt_ids], dtype=torch.long, device=DEVICE)
     
-    print(f"\n🚀 [平行映射] 總長度 L={N_len + expected_b_size} (N={N_len}, B={expected_b_size})")
-    print(f"✨ [執行模式] 非自迴歸 Single-Shot 平行提取...")
+    # 🌟 核心防護：鎖定物理斷層點。無論迴圈跑多少次，n_split 永遠固定在 N
+    n_split_tensor = torch.tensor([N_len], dtype=torch.long, device=DEVICE)
     
-    # 執行單次 Forward
-    outputs = model(input_ids=current_ids)
+    print(f"\n🚀 [雙擎解碼] 啟動 AR + NAR 異步融合生成 (初始長度 N={N_len})")
+    print(f"✨ [狀態] 宏觀引擎 M_global (NAR) 已鎖定於前 {N_len} 個 Token。")
+    print(f"✨ [狀態] 微觀引擎 Local SDPA (AR) 啟動字元接龍...\n")
     
-    # 🌟 核心防護：從 CausalLMOutput 中明確提取 logits Tensor
-    if hasattr(outputs, 'logits'):
-        logits = outputs.logits
-    elif isinstance(outputs, dict):
-        logits = outputs['logits']
-    else:
-        logits = outputs
+    generated_ids = []
+    avg_conf = 0.0
     
-    # 根據平移量對齊：提取整個 B 區塊的預測 Logits
-    # (N_len-1 位置預測第 N_len 個 Token)
-    pred_logits = logits[0, N_len-1 : N_len-1 + expected_b_size, :]
-    
-    # 計算預測信心度
-    probs = F.softmax(pred_logits, dim=-1)
-    max_probs, pred_ids_full = torch.max(probs, dim=-1)
-    avg_conf = max_probs[:max_display].mean().item()
-    
-    # 截斷邏輯：遇到 EOS 或是 PAD 停止輸出
-    final_ids = []
-    for pid in pred_ids_full.tolist():
-        if pid == tokenizer.eos_token_id or pid == pad_id:
-            break
-        final_ids.append(pid)
-        if len(final_ids) >= max_display:
+    for step in range(max_display):
+        # 🌟 每次前向傳播都必須傳入 n_split_index，防止未來字元流回 Phase I/II
+        outputs = model(input_ids=current_ids, n_split_index=n_split_tensor)
+        
+        if hasattr(outputs, 'logits'):
+            logits = outputs.logits
+        elif isinstance(outputs, dict):
+            logits = outputs['logits']
+        else:
+            logits = outputs
+            
+        # 取出最後一個位置的 Logit 進行預測 (AR 本質)
+        next_token_logits = logits[0, -1, :]
+        probs = F.softmax(next_token_logits, dim=-1)
+        max_prob, next_token = torch.max(probs, dim=-1)
+        
+        next_token_id = next_token.item()
+        avg_conf += max_prob.item()
+        
+        # 遇到 EOS 終止
+        if next_token_id == tokenizer.eos_token_id:
             break
             
-    output_text = tokenizer.decode(final_ids, skip_special_tokens=True)
+        generated_ids.append(next_token_id)
+        
+        # 🌟 將新預測的 Token 拼接回去，推進 AR 迴圈
+        current_ids = torch.cat([current_ids, torch.tensor([[next_token_id]], device=DEVICE)], dim=1)
+        
+        # 可選：即時印出打字機效果
+        # print(tokenizer.decode([next_token_id]), end="", flush=True)
+            
+    avg_conf = avg_conf / max(1, len(generated_ids))
+    output_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
     
     print(f"📊 預測平均信心度: {avg_conf:.4f}")
-    print(f"✅ 模型平行輸出 (前 {max_display} Token)：\n{output_text}")
+    print(f"✅ 模型 AR+NAR 融合輸出：\n{output_text}")
     print("-" * 50)
     
     return output_text
@@ -153,10 +160,10 @@ if __name__ == "__main__":
     true_ans_text = tokenizer.decode([i for i in true_b_ids[:max_tokens] if i != 0], skip_special_tokens=True)
     
     print(f"\n💡 [標準答案 Ground Truth] B 區塊內容 (前 {max_tokens} Token)：\n{true_ans_text}")
-    print("\n🎯 測試啟動：AGIV2 CPT 物理隔離平行映射驗證")
+    print("\n🎯 測試啟動：AGIV2 CPT 雙擎異步解碼驗證")
     
-    # 4. 啟動生成
-    generate_cpt_parallel(
+    # 4. 啟動生成 (改呼叫 AR 版本)
+    generate_cpt_autoregressive(
         model=model, 
         tokenizer=tokenizer, 
         prompt_ids=prompt_ids, 

@@ -82,7 +82,7 @@ class AGIV2LocalBlock(nn.Module):
         
         self.ffn = GemmaFFN(hidden_size=D, intermediate_size=hidden_dim)
 
-    def forward(self, X, shift_size=0):
+    def forward(self, X, shift_size=0, n_split_index=None):
         B, L, D = X.shape
         device = X.device
         
@@ -124,18 +124,20 @@ class AGIV2LocalBlock(nn.Module):
         attn_weights = torch.matmul(Q_c_scaled, K_c_scaled.transpose(-1, -2))
         attn_weights = torch.tanh(attn_weights) * 50.0 
         
-        # 🚀 取消盲目的因果遮罩 (Causal Mask)，僅保留 CHUNK SHIFT 遮罩
+        # 🌟 修改點：引入 Causal Mask 支援 AR 收斂
+        causal_mask = torch.tril(torch.ones((self.C, self.C), device=device, dtype=torch.bool))
+        
         if shift_size > 0:
             region_idx = torch.zeros(L_pad, device=device)
             region_idx[-shift_size:] = 1 
             mask_windows = region_idx.view(1, N, 1, self.C, 1)
             # block_mask 保證被擠壓跨界的 Token 不會互相 Attention
-            sdpa_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
+            shift_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
+            sdpa_mask = shift_mask & causal_mask.view(1, 1, 1, self.C, self.C)
         else:
-            sdpa_mask = None
+            sdpa_mask = causal_mask.view(1, 1, 1, self.C, self.C)
             
-        if sdpa_mask is not None:
-            attn_weights = attn_weights.masked_fill(~sdpa_mask, torch.finfo(attn_weights.dtype).min)
+        attn_weights = attn_weights.masked_fill(~sdpa_mask, torch.finfo(attn_weights.dtype).min)
             
         attn_probs = F.softmax(attn_weights, dim=-1)
         
@@ -210,13 +212,22 @@ class AGIV2GlobalBlock(nn.Module):
         
         self.ffn = GemmaFFN(hidden_size=D, intermediate_size=hidden_dim)
 
-    def forward(self, X, shift_size=0):
+    def forward(self, X, shift_size=0, n_split_index=None):
         B, L, D = X.shape
         device = X.device
         dtype = X.dtype
         
-        # [Phase I] FFT 分支
-        normed_X_fft = self.fft_norm(X)
+        # 🌟 物理隔離前處理：建立張量遮罩，阻斷 B 區塊流入 NAR 引擎
+        if n_split_index is not None:
+            seq_range = torch.arange(L, device=device).unsqueeze(0)
+            past_mask = seq_range < n_split_index.unsqueeze(1) # [B, L]
+            X_past = X * past_mask.unsqueeze(-1).to(dtype) # 未來直接歸零
+        else:
+            X_past = X
+            past_mask = None
+            
+        # [Phase I] FFT 分支 (物理隔斷：僅處理 X_past)
+        normed_X_fft = self.fft_norm(X_past)
         
         t = torch.arange(L, device=device, dtype=torch.float32)
         args = t.unsqueeze(1) * self.omegas.unsqueeze(0).to(torch.float32)
@@ -233,10 +244,12 @@ class AGIV2GlobalBlock(nn.Module):
         Y_f = X_f * torch.conj(H_f)
         Y_sys1 = torch.fft.irfft(Y_f, n=2*L, dim=1).to(dtype)[:, :L, :]
         
+        # 即使未來區域接收到 Y_sys1 訊號，這也是基於純過去推演出的外推共振
         X_res0 = X + (Y_sys1 * self.gate_fft.to(dtype))
         
-        # [Phase II] 潛在記憶池 (Latent Memory Pool)
-        normed_X_mem = self.mem_norm(X_res0)
+        # [Phase II] 潛在記憶池 (Latent Memory Pool) - 物理隔斷：防禦共振回推
+        X_res0_past = X_res0 * past_mask.unsqueeze(-1).to(dtype) if past_mask is not None else X_res0
+        normed_X_mem = self.mem_norm(X_res0_past)
         
         K_mem = self.W_k_mem(normed_X_mem)  # [B, L, D]
         V_mem = self.W_v_mem(normed_X_mem)  # [B, L, D]
@@ -251,22 +264,46 @@ class AGIV2GlobalBlock(nn.Module):
         K_chunks = K_mem_p.view(B, N_mem, self.C, D)  # [B, N, C, D]
         V_chunks = V_mem_p.view(B, N_mem, self.C, D)
         
-        # Step 2: 每個 Chunk 獨立壓縮 (完全平行，GPU 單次 Kernel)
+        # Step 2: 每個 Chunk 獨立壓縮 
         Q_exp = self.Q_mem.view(1, 1, self.M, D).expand(B, N_mem, -1, -1)  # [B, N, M, D]
-        updates = F.scaled_dot_product_attention(
-            Q_exp.reshape(B * N_mem, 1, self.M, D),
-            K_chunks.reshape(B * N_mem, 1, self.C, D),
-            V_chunks.reshape(B * N_mem, 1, self.C, D),
-            dropout_p=0.0, is_causal=False
-        ).reshape(B, N_mem, self.M, D)  # [B, N, M, D]
         
-        # 🚀 嚴格移除因果限制：不再依賴 Causal Running Mean，直接生成全域共享的 M_global
-        M_global = updates.mean(dim=1, keepdim=True).expand(-1, N_mem, -1, -1)  # [B, N, M, D]
+        # 🌟 物理隔離處理：安全避開未來污染與 NaN 計算
+        if past_mask is not None:
+            past_mask_pad = F.pad(past_mask, (0, mem_pad), value=False)
+            past_mask_chunks = past_mask_pad.view(B, N_mem, self.C) # [B, N, C]
+            
+            chunk_valid = past_mask_chunks.any(dim=-1, keepdim=True) # [B, N, 1]
+            safe_past_mask = past_mask_chunks | ~chunk_valid # 避免全 False 導致 Softmax NaN
+            attn_mask = safe_past_mask.view(B * N_mem, 1, 1, self.C)
+            
+            updates = F.scaled_dot_product_attention(
+                Q_exp.reshape(B * N_mem, 1, self.M, D),
+                K_chunks.reshape(B * N_mem, 1, self.C, D),
+                V_chunks.reshape(B * N_mem, 1, self.C, D),
+                attn_mask=attn_mask,
+                dropout_p=0.0, is_causal=False
+            ).reshape(B, N_mem, self.M, D)
+            
+            # 僅平均池化有效的過去 Chunk，產生純淨 M_global
+            chunk_valid_N = chunk_valid.view(B, N_mem, 1, 1)
+            M_global_sum = (updates * chunk_valid_N).sum(dim=1, keepdim=True)
+            valid_count = chunk_valid_N.sum(dim=1).view(B, 1, 1, 1).clamp(min=1)
+            M_global_single = M_global_sum / valid_count # [B, 1, M, D]
+        else:
+            updates = F.scaled_dot_product_attention(
+                Q_exp.reshape(B * N_mem, 1, self.M, D),
+                K_chunks.reshape(B * N_mem, 1, self.C, D),
+                V_chunks.reshape(B * N_mem, 1, self.C, D),
+                dropout_p=0.0, is_causal=False
+            ).reshape(B, N_mem, self.M, D)  # [B, N, M, D]
+            M_global_single = updates.mean(dim=1, keepdim=True)
+            
+        M_global = M_global_single.expand(-1, N_mem, -1, -1)  # [B, N, M, D]
         
-        # [Phase III] Local + Cross 注意力
+        # [Phase III] Local + Cross 注意力 (處理包含未來的完整 X_res0)
         normed_X_loc = self.input_layernorm(X_res0)
         
-        pad_len = mem_pad  # 複用 Phase II 的 Padding (保證 N 一致)
+        pad_len = mem_pad  
         Z = F.pad(normed_X_loc, (0, 0, 0, pad_len)) if pad_len > 0 else normed_X_loc
         L_pad = L_mem_pad
         N = N_mem
@@ -301,17 +338,19 @@ class AGIV2GlobalBlock(nn.Module):
         attn_weights = torch.matmul(Q_c_scaled, K_c_scaled.transpose(-1, -2))
         attn_weights = torch.tanh(attn_weights) * 50.0
         
-        # 🚀 取消盲目的因果遮罩 (Causal Mask)，僅保留 CHUNK SHIFT 遮罩
+        # 🌟 修改點：引入 Causal Mask 支援 AR 收斂
+        causal_mask = torch.tril(torch.ones((self.C, self.C), device=device, dtype=torch.bool))
+        
         if shift_size > 0:
             region_idx = torch.zeros(L_pad, device=device)
             region_idx[-shift_size:] = 1 
             mask_windows = region_idx.view(1, N, 1, self.C, 1)
-            sdpa_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
+            shift_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
+            sdpa_mask = shift_mask & causal_mask.view(1, 1, 1, self.C, self.C)
         else:
-            sdpa_mask = None
+            sdpa_mask = causal_mask.view(1, 1, 1, self.C, self.C)
             
-        if sdpa_mask is not None:
-            attn_weights = attn_weights.masked_fill(~sdpa_mask, torch.finfo(attn_weights.dtype).min)
+        attn_weights = attn_weights.masked_fill(~sdpa_mask, torch.finfo(attn_weights.dtype).min)
             
         attn_probs = F.softmax(attn_weights, dim=-1)
         
@@ -383,12 +422,13 @@ class AGIV2G(nn.Module):
         self.final_norm = GemmaRMSNorm(D)
         self.fc_out = nn.Linear(D, vocab_size, bias=False)
 
-    def forward(self, x):
+    def forward(self, x, n_split_index=None):
         out = self.embedding(x)
         out = out * math.sqrt(self.D) 
         for i, block in enumerate(self.blocks):
             shift_size = (block.C // 2) if (i % 2 != 0) else 0
-            out = block(out, shift_size=shift_size)
+            # 🌟 穿透傳遞 n_split_index 抵達核心
+            out = block(out, shift_size=shift_size, n_split_index=n_split_index)
         out = self.final_norm(out)
         logits = self.fc_out(out)
         
