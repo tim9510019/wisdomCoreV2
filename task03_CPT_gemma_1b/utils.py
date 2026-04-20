@@ -5,12 +5,164 @@ import numpy as np
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 import math
+import queue
+import threading
+import concurrent.futures
+import json
+import pyarrow.parquet as pq
+
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from torch.utils.data import Dataset
+import boto3
+import botocore
+from smart_open import open as smart_open
+
+# ==========================================
+# [ 雲端觀測區 ] 全域 S3 實體連線初始化
+# ==========================================
+# 使用無簽名配置以進行高頻率匿名存取
+s3_client = boto3.client(
+    's3',
+    region_name='us-west-2',
+    config=botocore.config.Config(signature_version=botocore.UNSIGNED)
+)
 
 MODEL_ID = "google/gemma-3-1b-it"
 B_SIZE = 512
+
+# ==========================================
+# 資料處理與異步 I/O 共用模組 (1K / 4K 共用)
+# ==========================================
+
+class AsyncS3Prefetcher:
+    """背景非同步抓取 S3 程式碼的緩衝池"""
+    def __init__(self, stream, max_workers=32, queue_size=500):
+        self.stream = stream
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.stop_event = threading.Event()
+        self.producer_thread = threading.Thread(target=self._produce, daemon=True)
+        self.producer_thread.start()
+        print(f"⚡ 異步 S3 預取引擎啟動：{max_workers} 執行緒映射實體檔案 (針對 smollm)...")
+
+    def _fetch(self, blob_id: str) -> str:
+        try:
+            s3_url = f"s3://softwareheritage/content/{blob_id}"
+            with smart_open(s3_url, "rb", compression=".gz", transport_params={"client": s3_client}) as f:
+                return f.read().decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+    def _produce(self):
+        try:
+            for sample in self.stream:
+                if self.stop_event.is_set(): break
+                blob_id = sample.get("blob_id")
+                if blob_id:
+                    self.queue.put(self.executor.submit(self._fetch, blob_id)) 
+        except Exception as e:
+            print(f"\n⚠️ S3 預取引擎異常: {e}")
+        finally:
+            self.queue.put(None) 
+
+    def get_next_text(self) -> str:
+        future = self.queue.get()
+        if future is None: raise StopIteration("S3 程式碼資料流已枯竭")
+        return future.result()
+
+class AsyncRedPajamaFilter:
+    """針對 SlimPajama 巨獸矩陣的獨立過濾器，精準萃取 GitHub"""
+    def __init__(self, stream, queue_size=500):
+        self.stream = stream
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.stop_event = threading.Event()
+        self.producer_thread = threading.Thread(target=self._produce, daemon=True)
+        self.producer_thread.start()
+        print("⚡ 異步過濾引擎啟動：獨立執行緒全速吞噬 SlimPajama，精準萃取 GitHub...")
+
+    def _produce(self):
+        try:
+            for sample in self.stream:
+                if self.stop_event.is_set(): break
+                
+                set_name = sample.get("redpajama_set_name")
+                if not set_name:
+                    meta = sample.get("meta", {})
+                    if isinstance(meta, str):
+                        try: meta = json.loads(meta)
+                        except: meta = {}
+                    set_name = meta.get("redpajama_set_name", "")
+                
+                if set_name == "RedPajamaGithub":
+                    text = sample.get("text", sample.get("content", sample.get("code", "")))
+                    if text and text.strip():
+                        self.queue.put(text)
+        except Exception as e:
+            print(f"\n⚠️ RedPajama 過濾引擎異常: {e}")
+        finally:
+            self.queue.put(None)
+
+    def get_next_text(self) -> str:
+        text = self.queue.get()
+        if text is None: raise StopIteration("RedPajama 資料流已徹底耗盡")
+        return text
+
+def verify_existing_matrix(output_file, target_sequences, tag="實體", exact_match=True):
+    """實體拓撲檢驗，支援絕對比對 (1K) 或容許極小誤差比對 (4K)"""
+    if not os.path.exists(output_file):
+        print(f"🌌 觀測結果：{tag}磁區不存在，準備無中生有。")
+        return False
+        
+    try:
+        pf = pq.ParquetFile(output_file)
+        num_rows = pf.metadata.num_rows
+        print(f"📊 當前序列數 (Rows): {num_rows} / 預期序列數: {target_sequences}")
+        
+        if exact_match:
+            if num_rows == target_sequences:
+                print(f"✅ 拓撲完整性 100%！{tag}矩陣已完美定錨，無須重複運算。")
+                return True
+        else:
+            if num_rows >= target_sequences * 0.99: 
+                print(f"✅ 拓撲完整性達標！{tag}矩陣已定錨。")
+                return True
+                
+        print("⚠️ 序列數量不符，宇宙發生了坍縮。準備啟動超光速引擎進行覆寫...")
+        return False
+    except Exception as e:
+        print(f"⚠️ 磁區讀取失敗 ({e})，檔案內部結構已損毀。準備啟動引擎覆寫...")
+        return False
+
+def get_boundary_ids(tokenizer):
+    """預計算高維度拓撲邊界 Token IDs"""
+    boundary_ids = set()
+    boundary_chars = ['\n', '.', '?', '!', ';', '。', '！', '？', '；']
+    for s in boundary_chars + [f" {c}" for c in boundary_chars] + [f"a{c}" for c in boundary_chars]:
+        tokens = tokenizer.encode(s, add_special_tokens=False)
+        if tokens: boundary_ids.add(tokens[-1]) 
+    return boundary_ids
+
+def find_topological_boundary(seq, target_n, doc_sep_id, boundary_ids, 
+                              offset_large, margin_large, offset_small, margin_small):
+    """O(1) 邊界尋路演算法"""
+    for offset in range(offset_large):
+        left_idx = target_n - offset
+        right_idx = target_n + offset
+        if left_idx > margin_large and seq[left_idx] == doc_sep_id: return left_idx + 1  
+        if right_idx < len(seq) - margin_large and seq[right_idx] == doc_sep_id: return right_idx + 1
+
+    for offset in range(offset_small):
+        left_idx = target_n - offset
+        right_idx = target_n + offset
+        if left_idx > margin_small and seq[left_idx] in boundary_ids: return left_idx + 1  
+        if right_idx < len(seq) - margin_small and seq[right_idx] in boundary_ids: return right_idx + 1
+            
+    return target_n
+
+# ==========================================
+# 量子疊加態數據引擎 AC 版 & 訓練模型包裝器
+# ==========================================
 
 class QuantumRouterEngineAC:
     def __init__(self):
@@ -85,8 +237,8 @@ class QuantumRouterEngineAC:
             res = list(filler)
             for p, content in sorted(content_list, key=lambda x: x[0], reverse=True):
                 idx = int(len(filler) * p)
-                res = res[:idx] + content + res[idx:] # 安全插入，不覆蓋
-            return res[:available_filler_len] + q_ids # 安全截斷背景，保證 Query 在絕對尾部
+                res = res[:idx] + content + res[idx:] 
+            return res[:available_filler_len] + q_ids 
 
         pos_a = random.uniform(0.05, 0.45)
         pos_b, pos_c = random.uniform(pos_a + 0.15, 0.90), random.uniform(0.10, 0.95)
@@ -103,7 +255,6 @@ class QuantumRouterEngineAC:
         pos_final = n_pos_ids + build_b_block(f" {secret_val}")
         neg_final = n_neg_ids + build_b_block(" REDACTED")
 
-        # 這裡為了符合 transformers Trainer 的 collate_fn 預期，包成 torch.tensor
         return {
             "pos_ids": pos_final, 
             "neg_ids": neg_final
@@ -121,7 +272,6 @@ class DynamicACDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        # 及時產生一筆數據
         base_len = random.choice(self.target_lengths)
         return self.engine.create_triplet_ac(base_len)
 
@@ -136,21 +286,19 @@ class AGIV2GForCausalLM(nn.Module):
         self.use_gc = use_gc
 
     def forward(self, input_ids, labels=None, **kwargs):
-        # 🌟 攔截由 CPTDataCollator 傳遞下來的物理隔離邊界 (n_split_index)
         n_split_index = kwargs.get("n_split_index", None)
 
         hidden_states = self.base_model.embedding(input_ids)
-        # 保留 Gemma 架構必須的縮放
         hidden_states = hidden_states * math.sqrt(self.base_model.D)
         
         for i, block in enumerate(self.base_model.blocks):
             shift_size = (block.C // 2) if (i % 2 != 0) else 0
             if self.training and self.use_gc:
                 hidden_states = checkpoint.checkpoint(
-                    block, hidden_states, shift_size, use_reentrant=False, n_split_index=n_split_index # 🌟 穿透傳遞給底層 AGIBlock
+                    block, hidden_states, shift_size, use_reentrant=False, n_split_index=n_split_index 
                 )
             else:
-                hidden_states = block(hidden_states, shift_size=shift_size, n_split_index=n_split_index) # 🌟 穿透傳遞給底層 AGIBlock
+                hidden_states = block(hidden_states, shift_size=shift_size, n_split_index=n_split_index) 
                 
         hidden_states = self.base_model.final_norm(hidden_states)
         
@@ -181,22 +329,17 @@ class AGIV2GForCausalLM(nn.Module):
                 
             loss = total_loss / max(valid_tokens, 1)
             
-            # 🌟 新增：微重力錨定 Loss (Micro-Gravity Anchor Loss)
-            # 牽引閘門在訓練中後期平滑地向 1.0 (全開) 靠攏
             gate_anchor_loss = 0.0
             gate_count = 0
             for block in self.base_model.blocks:
                 if hasattr(block, 'gate_mem'):
-                    # 🌟 核心修正：加入 .sum() 降維成純量 (Scalar)，防止 [1] 與 [] 廣播碰撞
                     gate_anchor_loss += (block.gate_fft.sum() - 1.0)**2
                     gate_anchor_loss += (block.gate_mem.sum() - 1.0)**2
                     gate_count += 2
                     
             if gate_count > 0:
                 gate_anchor_loss = gate_anchor_loss / gate_count
-                # 0.05 的係數確保它在早期不會蓋過 Causal LM 的防護力
                 loss = loss + 0.05 * gate_anchor_loss 
-            # 🌟 新增結束
             
         else:
             logits = self.base_model.fc_out(hidden_states)
@@ -216,7 +359,6 @@ def transplant_and_freeze(model_id, agiv2_base):
     new_sd = {}
 
     new_sd['embedding.weight'] = src_sd.get('model.embed_tokens.weight')
-    # 保留 Gemma 可能的權重綁定邏輯
     new_sd['fc_out.weight'] = src_sd.get('lm_head.weight') if 'lm_head.weight' in src_sd else src_sd.get('model.embed_tokens.weight')
     new_sd['final_norm.weight'] = src_sd.get('model.norm.weight')
 
