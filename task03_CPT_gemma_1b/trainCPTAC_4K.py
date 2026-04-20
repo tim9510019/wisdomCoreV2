@@ -5,7 +5,7 @@ trainCPTAC_4K.py — AGIV2 持續預訓練終極引擎 (Stage 2: 4K 視界擴展
 1. 跨階拓撲繼承：精準載入 1K 階段 Best Model，在已覺醒的局部路由基礎上，強制擴展 4K 全局共振。
 2. Smart Token Init：將原生空白符號 <unused0> 的權重初始化為換行與 EOS 的平均疊加態，消除高頻雜訊。
 3. 退火震盪容忍：4K 序列下的 Loss 震盪是尋找全局最優盆地的必然物理現象，監控器將專注於 Gate 極化程度。
-4. 物理隔離直讀：DataCollator N -> N+B 絕對斷層隔離，梯度僅從 B 流回。
+4. 物理隔離直讀：DataCollator 釋放真實訊號，n_split_index 穿透底層執行 NAR 隔離，表層執行 AR 收斂。
 """
 import os
 import sys
@@ -116,7 +116,7 @@ class QuantumCPTMonitor(TrainerCallback):
                     print(f"\n[Monitor] 🌌 4K 結構極化收斂 ({current_loss:.4f})，實體權重已錨定。")
 
 # ==========================================
-# [ 物理隔離 ] N -> N+B 絕對斷層拼接器
+# [ 物理隔離 ] N -> N+B 絕對斷層拼接器 (非對稱解耦版)
 # ==========================================
 class CPTDataCollator:
     def __init__(self, pad_token_id):
@@ -125,23 +125,32 @@ class CPTDataCollator:
     def __call__(self, features):
         batch_input_ids = []
         batch_labels = []
+        batch_n_splits = []
         max_len = max(len(f["input_ids"]) for f in features)
         
         for f in features:
             seq = f["input_ids"]
             n_split = f["n_split_index"]
-            pad_len = max_len - len(seq)
-            
-            padded_seq = seq + [self.pad_token_id] * pad_len
-            batch_input_ids.append(padded_seq)
-            
             n_split = min(n_split, len(seq)) 
+            
+            # 🌟 核心修改：非對稱解耦 (Asymmetric Decoupling)
+            # 釋放真實訊號，不抹除 B 區塊，保留完整 [N, B] 讓 Local SDPA 執行 AR 接龍
+            # M_global 的 NAR 物理隔斷，將由穿透下去的 n_split_index 在模型內部執行
+            pad_len = max_len - len(seq)
+            padded_input = seq + [self.pad_token_id] * pad_len
+            batch_input_ids.append(padded_input)
+            
+            # 🌟 預測目標不變：前 N 個不計算 Loss (-100)，只針對 B 區塊計算 AR 預測的 Loss
             labels = [-100] * n_split + seq[n_split:] + [-100] * pad_len
             batch_labels.append(labels)
             
+            # 🌟 收集切分點，準備穿透至底層
+            batch_n_splits.append(n_split)
+            
         return {
             "input_ids": torch.tensor(batch_input_ids, dtype=torch.long),
-            "labels": torch.tensor(batch_labels, dtype=torch.long)
+            "labels": torch.tensor(batch_labels, dtype=torch.long),
+            "n_split_index": torch.tensor(batch_n_splits, dtype=torch.long) # 🌟 穿透參數，傳遞給底層進行物理截斷
         }
 
 # ==========================================
@@ -197,17 +206,22 @@ def main():
     print(f"✅ {DOC_SEP_TOKEN} 已被賦予換行與 EOS 的疊加態語義。")
 
     # 4. 外科手術解凍矩陣
-    routing_keys = ["gate_fft", "gate_mem", "omegas", "mlp_H", "Q_mem", "W_k_mem", "W_v_mem", "W_q_cross", "o_proj_cross"]
+    # 🌟 修改點：增量解凍法 (對齊 1K 的修正，不再漏掉任何新增參數)
     norm_keys = ["norm", "input_layernorm", "post_attention_layernorm"] 
     frozen_keys = ["lm_head", "o_proj"] 
     
     print("\n🔧 啟動外科手術解凍程序 (CPT 4K Stage):")
+    # 繼承 transplant_and_freeze 的狀態 (AGIV2新層皆為 True，Gemma 舊層為 False)
     for name, param in model.named_parameters():
-        param.requires_grad = False
-        if any(k in name for k in routing_keys) or any(k in name for k in norm_keys):
+        # 1. 額外解凍 Gemma 的 Norm 參數，以適應真實語義分佈
+        if any(k in name for k in norm_keys):
             param.requires_grad = True
+            
+        # 2. 保險防護：確保原始的輸出與映射層絕對不被動到 (防範意外匹配)
         if any(k in name for k in frozen_keys) and "o_proj_cross" not in name:
             param.requires_grad = False
+            
+        # 3. 註冊動態鎖相 (Dynamic Phase-Locking) 的梯度放大器
         if ("gate_fft" in name or "gate_mem" in name) and param.requires_grad:
             param.register_hook(lambda grad: grad * 10.0) # 保持梯度強心針
             
