@@ -1,4 +1,4 @@
-# trainCPTAC_1K.py — AGIV2 持續預訓練終極引擎 (N -> N+B 物理隔離直讀版)
+# trainCPTAC_1K.py — AGIV2 持續預訓練終極引擎 (N -> N+B 嚴格物理隔離防作弊版)
 import os
 import sys
 import csv
@@ -49,10 +49,9 @@ class QuantumCPTMonitor(TrainerCallback):
     def __init__(self, path=LOG_PATH, save_dir=SAVE_DIR):
         self.path = path
         self.save_dir = save_dir
-        self.best_eval_loss = float('inf') # 🌟 修正：從追蹤 loss 改為嚴格追蹤 eval_loss
+        self.best_eval_loss = float('inf') 
         os.makedirs(self.save_dir, exist_ok=True)
         
-        # 🌟 歷史回溯：邏輯對齊 Router，精準掃描 eval_loss (第三欄)
         if os.path.exists(self.path):
             try:
                 with open(self.path, 'r', encoding='utf-8') as f:
@@ -70,7 +69,6 @@ class QuantumCPTMonitor(TrainerCallback):
             except Exception as e:
                 print(f"\n⚠️ [Monitor] 讀取歷史紀錄失敗: {e}")
         else:
-            # 🌟 修正 CSV 標頭，加入 eval_loss
             with open(self.path, 'w', newline='') as f:
                 csv.writer(f).writerow(['step', 'loss', 'eval_loss', 'fft_max', 'mem_max', 'time'])
 
@@ -88,12 +86,10 @@ class QuantumCPTMonitor(TrainerCallback):
                     logs["fft_max"] = round(max_fft, 6)
                     logs["mem_max"] = round(max_mem, 6)
             
-            # 🌟 單純負責寫入，拔除在此處存檔的危險邏輯
             with open(self.path, 'a', newline='') as f:
                 csv.writer(f).writerow([state.global_step, logs.get("loss", ""), logs.get("eval_loss", ""), max_fft, max_mem, time.ctime()])
                 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        """🌟 嚴格保存最佳模型 (與 Router 邏輯完全一致，有突破才存檔)"""
         if metrics and "eval_loss" in metrics:
             current_eval_loss = metrics["eval_loss"]
             if current_eval_loss < self.best_eval_loss:
@@ -109,7 +105,7 @@ class QuantumCPTMonitor(TrainerCallback):
                 print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})，跳過保存。")
 
 # ==========================================
-# [ 物理隔離 ] N -> N+B 絕對斷層拼接器
+# [ 物理隔離 ] N -> N+B 絕對斷層拼接器 (防作弊修正版)
 # ==========================================
 class CPTDataCollator:
     def __init__(self, pad_token_id):
@@ -124,12 +120,18 @@ class CPTDataCollator:
         for f in features:
             seq = f["input_ids"]
             n_split = f["n_split_index"]
-            pad_len = max_len - len(seq)
-            
-            padded_seq = seq + [self.pad_token_id] * pad_len
-            batch_input_ids.append(padded_seq)
-            
             n_split = min(n_split, len(seq)) 
+            
+            # 🌟 核心防禦機制：物理抹除 B 區塊的輸入，防止全局路由 (FFT/Mem) 看見未來
+            # 輸入矩陣中，n_split 之後的內容全部被強制替換為 PAD
+            isolated_seq = seq[:n_split] + [self.pad_token_id] * (len(seq) - n_split)
+            
+            pad_len = max_len - len(seq)
+            # 對齊 Batch 內的最大長度
+            padded_input = isolated_seq + [self.pad_token_id] * pad_len
+            batch_input_ids.append(padded_input)
+            
+            # 🌟 預測目標不變：前 N 個不計算 Loss (-100)，只預測 B 區塊的真實答案
             labels = [-100] * n_split + seq[n_split:] + [-100] * pad_len
             batch_labels.append(labels)
             
@@ -142,7 +144,7 @@ class CPTDataCollator:
 # [ 核心引擎 ] 主執行緒與外科手術解凍
 # ==========================================
 def main():
-    print("\n🚀 啟動 AGIV2 CPT 第一階訓練矩陣 (N -> N+B 物理隔離直讀版)...")
+    print("\n🚀 啟動 AGIV2 CPT 第一階訓練矩陣 (N -> N+B 物理隔離防作弊版)...")
     
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
@@ -223,7 +225,7 @@ def main():
     if last_checkpoint is not None:
         print(f"\n🚀 偵測到時間錨點 {last_checkpoint}，啟動狀態無損恢復...")
     else:
-        print("\n🚀 開始全新 CPT 物理隔離訓練 (N -> N+B)...")
+        print("\n🚀 開始全新 CPT 物理隔離防作弊訓練 (N -> N+B)...")
 
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
