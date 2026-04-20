@@ -176,6 +176,14 @@ def main():
     else:
         print(f"\n⚠️ 找不到 32K 路由權重檔案 {BEST_ROUTER_32K_PATH}，將僅依賴原始 Gemma 權重從頭開始 CPT！")
 
+    # 🌟 核心修改點：強制拓撲重置 (Zero-Gate Initialization)
+    print("\n🔧 執行強制拓撲重置：將所有 gate_fft 與 gate_mem 初始化為 0.0 (回歸平滑開啟)...")
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "gate_fft" in name or "gate_mem" in name:
+                param.data.fill_(0.0)
+    print("✅ 閘門已全數歸零，模型將由純粹的微觀 AR 接龍開始，讓梯度決定宏觀開啟時機。")
+
     # 🌟 修改點：增量解凍法
     norm_keys = ["norm", "input_layernorm", "post_attention_layernorm"] 
     frozen_keys = ["lm_head", "o_proj"] 
@@ -191,9 +199,8 @@ def main():
         if any(k in name for k in frozen_keys) and "o_proj_cross" not in name:
             param.requires_grad = False
             
-        # 3. 註冊動態鎖相 (Dynamic Phase-Locking) 的梯度放大器
-        if ("gate_fft" in name or "gate_mem" in name) and param.requires_grad:
-            param.register_hook(lambda grad: grad * 10.0)
+        # 3. 取消梯度強心針，讓 Gate 依賴微重力與自然梯度平滑成長
+        # (這裡不需要 register_hook 了)
             
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"✅ 解凍完成。可訓練參數總量: {trainable_params:,}")

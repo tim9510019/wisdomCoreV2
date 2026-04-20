@@ -180,6 +180,24 @@ class AGIV2GForCausalLM(nn.Module):
                 del c_logits, c_hidden
                 
             loss = total_loss / max(valid_tokens, 1)
+            
+            # 🌟 新增：微重力錨定 Loss (Micro-Gravity Anchor Loss)
+            # 牽引閘門在訓練中後期平滑地向 1.0 (全開) 靠攏
+            gate_anchor_loss = 0.0
+            gate_count = 0
+            for block in self.base_model.blocks:
+                if hasattr(block, 'gate_mem'):
+                    # 🌟 核心修正：加入 .sum() 降維成純量 (Scalar)，防止 [1] 與 [] 廣播碰撞
+                    gate_anchor_loss += (block.gate_fft.sum() - 1.0)**2
+                    gate_anchor_loss += (block.gate_mem.sum() - 1.0)**2
+                    gate_count += 2
+                    
+            if gate_count > 0:
+                gate_anchor_loss = gate_anchor_loss / gate_count
+                # 0.05 的係數確保它在早期不會蓋過 Causal LM 的防護力
+                loss = loss + 0.05 * gate_anchor_loss 
+            # 🌟 新增結束
+            
         else:
             logits = self.base_model.fc_out(hidden_states)
             
