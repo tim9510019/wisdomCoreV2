@@ -31,7 +31,7 @@ LOG_PATH = "./agiv2_cpt_1k_log.csv"
 
 BEST_ROUTER_32K_PATH = "./agiv2_zerogate_ac_checkpoints_32K/best_model.pth"
 
-MAX_STEPS = 5000                   
+MAX_STEPS = 167818                   
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
 SAVE_STEPS = 100                   
@@ -173,17 +173,22 @@ def main():
     else:
         print(f"\n⚠️ 找不到 32K 路由權重檔案 {BEST_ROUTER_32K_PATH}，將僅依賴原始 Gemma 權重從頭開始 CPT！")
 
-    routing_keys = ["gate_fft", "gate_mem", "omegas", "mlp_H", "Q_mem", "W_k_mem", "W_v_mem", "W_q_cross", "o_proj_cross"]
+    # 🌟 修改點：增量解凍法
     norm_keys = ["norm", "input_layernorm", "post_attention_layernorm"] 
     frozen_keys = ["lm_head", "o_proj"] 
     
     print("\n🔧 啟動外科手術解凍程序 (CPT Stage):")
+    # 不再盲目強制全體 False，而是繼承 transplant_and_freeze 的狀態 (AGIV2新層皆為True)
     for name, param in model.named_parameters():
-        param.requires_grad = False
-        if any(k in name for k in routing_keys) or any(k in name for k in norm_keys):
+        # 1. 額外解凍 Gemma 的 Norm 參數，以適應真實語義分佈
+        if any(k in name for k in norm_keys):
             param.requires_grad = True
+            
+        # 2. 保險防護：確保原始的輸出與映射層絕對不被動到 (防範意外匹配)
         if any(k in name for k in frozen_keys) and "o_proj_cross" not in name:
             param.requires_grad = False
+            
+        # 3. 註冊動態鎖相 (Dynamic Phase-Locking) 的梯度放大器
         if ("gate_fft" in name or "gate_mem" in name) and param.requires_grad:
             param.register_hook(lambda grad: grad * 10.0)
             
