@@ -5,7 +5,7 @@ cpt4k.py — AGIV2 持續預訓練：第二階 (Intermediate) 4K 數據引擊 (�
 1. 視界擴展：維持 N+B 物理長度 4000，強迫啟動全局共振與潛在記憶。
 2. 原生隔絕符徵用：使用 <unused0> 確保零拓撲碰撞與硬體對齊保護。
 3. 極端語義淨化：徹底剔除 QA 與 NIAH，配置 80% Text + 20% Code。
-4. 絕對無重複 (Zero-Repetition)：完全捨棄 Epoch 輪迴，接入 100BT 文本與 59B 程式碼巨獸矩陣，
+4. 絕對無重複 (Zero-Repetition)：完全捨棄 Epoch 輪迴，接入 100BT 文本與 627B 程式碼巨獸矩陣，
    確保模型在 110 億 Tokens 的訓練流中，看見的每一個字都是全新的物理實體。
 """
 import os
@@ -35,11 +35,12 @@ OUTPUT_DIR = "./agiv2_stage2_4K"
 # 🌟 語義淨化配比 (80% 純文本，20% 多樣化純 CODE)
 RATIOS = {"long_text": 0.80, "code_smollm": 0.10, "code_redpajama": 0.10}
 
-# 🌟 數據源巨獸化 (10BT -> 100BT, 並新增 RedPajama 59B Github 矩陣)
+# 🌟 數據源巨獸化 (替換為社群備份的純 Parquet 鏡像，避開官方消失的磁區)
 DATA_SOURCES = {
     "long_text":      {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-100BT", "split": "train"},
     "code_smollm":    {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"},
-    "code_redpajama": {"path": "togethercomputer/RedPajama-Data-1T", "name": "github", "split": "train"}
+    # 🌟 突破點：切換至社群備份且支援原生 Parquet 的鏡像矩陣
+    "code_redpajama": {"path": "MBZUAI-LLM/SlimPajama-627B-DC", "name": "default", "split": "train"} 
 }
 
 WRITE_BATCH_SIZE = 5000 
@@ -93,8 +94,16 @@ class HyperDriveTopologicalBuilder4K:
         print("掛載開源巨獸資料流 (Streaming Parquet)...")
         self.streams = {}
         for key, conf in DATA_SOURCES.items():
-            kwargs = {"path": conf["path"], "split": conf["split"], "streaming": True}
-            if conf["name"]: kwargs["name"] = conf["name"]
+            # 乾淨俐落的掛載邏輯，不再使用任何容易被阻擋的遠端腳本參數
+            kwargs = {
+                "path": conf["path"], 
+                "split": conf["split"], 
+                "streaming": True
+            }
+            # 安全獲取 name 參數，避免 None 導致的問題
+            if conf.get("name"): 
+                kwargs["name"] = conf["name"]
+                
             self.streams[key] = iter(load_dataset(**kwargs))
 
         self.schema = pa.schema([
