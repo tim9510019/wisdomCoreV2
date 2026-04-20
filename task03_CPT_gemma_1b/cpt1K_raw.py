@@ -5,7 +5,9 @@ cpt1k.py — AGIV2 持續預訓練：第一階 (Beginner) 1K 數據引擎
 1. 視界鎖定：維持 N+B 物理長度 1000，專注於局部 SDPA 高精度映射。
 2. 絕對物理隔絕：徵用 Gemma 3 原生未使用的 <unused0> 作為文檔分隔牆，
    完全避免詞表擴增導致的維度碰撞與硬體對齊(262144)失效。
-3. 拓撲觀測：超光速緩衝池與 O(1) 邊界尋路。
+3. 極端語義淨化：徹底剔除 QA 與 NIAH，配置 80% Text + 20% Code。
+   強制洗除 -it 模型的指令慣性，逼迫 Local SDPA 專注於高熵文本的連續自迴歸接龍。
+4. 拓撲觀測：超光速緩衝池與 O(1) 邊界尋路。
 """
 import os
 import sys
@@ -26,20 +28,18 @@ RANDOM_SEED = 2026
 # 【核心突破】直接徵用原生空白符號，拋棄詞表擴充與整數寄生
 DOC_SEP_TOKEN = "<unused0>" 
 
-# N+B 總物理長度鎖定為 1000
+# N+B 總物理長度鎖定為 1000 (資料總數維持不變)
 TOTAL_SEQ_LEN = 1000 
 TARGET_SEQUENCES = 5370000 
 OUTPUT_DIR = "./agiv2_stage1_1K"
 
-# 三位一體的黃金配比
-RATIOS = {"short_text": 0.60, "short_code": 0.20, "short_qa": 0.10, "short_niah": 0.10}
+# 🌟 語義淨化配比 (徹底移除 QA 與 NIAH，強迫洗掉 -it 對話慣性)
+RATIOS = {"short_text": 0.80, "short_code": 0.20}
 
 # 全線接入高質量 Parquet 原生矩陣
 DATA_SOURCES = {
     "short_text": {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-10BT", "split": "train"},
-    "short_code": {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"}, 
-    "short_qa":   {"path": "Open-Orca/OpenOrca", "name": "default", "split": "train"},      
-    "short_niah": {"path": "HuggingFaceTB/smollm-corpus", "name": "cosmopedia-v2", "split": "train"} 
+    "short_code": {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"}
 }
 
 WRITE_BATCH_SIZE = 10000 
@@ -77,7 +77,7 @@ def verify_existing_matrix() -> bool:
 
 class HyperDriveTopologicalBuilder:
     def __init__(self):
-        print("🚀 啟動量子疊加態資料引擎：AGIV2 (超光速緩衝版 | O(1) 邊界尋路)")
+        print("🚀 啟動量子疊加態資料引擎：AGIV2 (超光速緩衝版 | O(1) 邊界尋路 | 極端語義淨化)")
         random.seed(RANDOM_SEED)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         
@@ -115,14 +115,8 @@ class HyperDriveTopologicalBuilder:
         try:
             sample = next(self.streams[source_type])
             
-            if source_type == "short_qa":
-                sys_prompt = sample.get("system_prompt", "")
-                question = sample.get("question", "")
-                response = sample.get("response", "")
-                text_parts = [p for p in (sys_prompt, question, response) if p and p.strip()]
-                text = "\n".join(text_parts)
-            else:
-                text = sample.get("text", sample.get("prompt", ""))
+            # 🌟 移除 QA 特殊邏輯，純粹提取連續文本
+            text = sample.get("text", sample.get("prompt", ""))
             
             return self.tokenizer.encode(text, add_special_tokens=False)
             
