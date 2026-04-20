@@ -7,7 +7,7 @@ cpt4k.py — AGIV2 持續預訓練：第二階 (Intermediate) 4K 數據引擎 (�
 3. 極端語義淨化：徹底剔除 QA 與 NIAH，配置 80% Text + 20% Code。
 4. 絕對無重複：完全捨棄 Epoch 輪迴，接入 100BT 文本與巨獸矩陣。
 5. 異質流觀測：針對無實體矩陣 (smollm) 啟動 S3 預取。
-6. 絕對純度過濾 (FIXED)：撤除無效的目錄映射，改用內部自旋鎖定，100% 防禦配比稀釋與語義污染。
+6. 異步純淨過濾 (NEW)：針對 SlimPajama 啟動全域洗牌與獨立背景執行緒，打破同質性阻塞。
 """
 import os
 import sys
@@ -49,11 +49,9 @@ OUTPUT_DIR = "./agiv2_stage2_4K"
 
 RATIOS = {"long_text": 0.80, "code_smollm": 0.10, "code_redpajama": 0.10}
 
-# 🌟 數據源巨獸化與精準鎖定
 DATA_SOURCES = {
     "long_text":      {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-100BT", "split": "train"},
     "code_smollm":    {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"},
-    # 🛡️ 撤除 data_dir，避免 HF 虛擬目錄解析崩潰，改由程式內部邏輯全盤接管
     "code_redpajama": {"path": "MBZUAI-LLM/SlimPajama-627B-DC", "name": "default", "split": "train"} 
 }
 
@@ -61,7 +59,7 @@ WRITE_BATCH_SIZE = 5000
 BUFFER_WATERMARK = TOTAL_SEQ_LEN * 100 
 
 # =====================================================================
-# [ 異步引擎區 ] 解決 S3 網路 I/O 阻塞的並行預取器
+# [ 異步引擎區 ] S3 預取與 RedPajama 獨立過濾器
 # =====================================================================
 class AsyncS3Prefetcher:
     def __init__(self, stream, max_workers=32, queue_size=500):
@@ -71,7 +69,7 @@ class AsyncS3Prefetcher:
         self.stop_event = threading.Event()
         self.producer_thread = threading.Thread(target=self._produce, daemon=True)
         self.producer_thread.start()
-        print(f"⚡ 異步預取引擎啟動：{max_workers} 執行緒全速映射 S3 實體檔案 (針對 smollm)...")
+        print(f"⚡ 異步 S3 預取引擎啟動：{max_workers} 執行緒映射實體檔案 (針對 smollm)...")
 
     def _fetch(self, blob_id: str) -> str:
         try:
@@ -84,22 +82,57 @@ class AsyncS3Prefetcher:
     def _produce(self):
         try:
             for sample in self.stream:
-                if self.stop_event.is_set():
-                    break
+                if self.stop_event.is_set(): break
                 blob_id = sample.get("blob_id")
                 if blob_id:
-                    future = self.executor.submit(self._fetch, blob_id)
-                    self.queue.put(future) 
+                    self.queue.put(self.executor.submit(self._fetch, blob_id)) 
         except Exception as e:
-            print(f"\n⚠️ 預取引擎發生異常: {e}")
+            print(f"\n⚠️ S3 預取引擎異常: {e}")
         finally:
             self.queue.put(None) 
 
     def get_next_text(self) -> str:
         future = self.queue.get()
-        if future is None:
-            raise StopIteration("S3 程式碼資料流已枯竭")
+        if future is None: raise StopIteration("S3 程式碼資料流已枯竭")
         return future.result()
+
+class AsyncRedPajamaFilter:
+    def __init__(self, stream, queue_size=500):
+        self.stream = stream
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.stop_event = threading.Event()
+        self.producer_thread = threading.Thread(target=self._produce, daemon=True)
+        self.producer_thread.start()
+        print("⚡ 異步過濾引擎啟動：獨立執行緒全速吞噬 SlimPajama，精準萃取 GitHub...")
+
+    def _produce(self):
+        try:
+            for sample in self.stream:
+                if self.stop_event.is_set(): break
+                
+                # 容錯解析：標籤可能在頂層或 meta 欄位
+                set_name = sample.get("redpajama_set_name")
+                if not set_name:
+                    meta = sample.get("meta", {})
+                    if isinstance(meta, str):
+                        try: meta = json.loads(meta)
+                        except: meta = {}
+                    set_name = meta.get("redpajama_set_name", "")
+                
+                # 嚴格觀測：命中 GitHub 才放入佇列，其餘直接在背景捨棄，不干擾主線程
+                if set_name == "RedPajamaGithub":
+                    text = sample.get("text", sample.get("content", sample.get("code", "")))
+                    if text and text.strip():
+                        self.queue.put(text)
+        except Exception as e:
+            print(f"\n⚠️ RedPajama 過濾引擎異常: {e}")
+        finally:
+            self.queue.put(None)
+
+    def get_next_text(self) -> str:
+        text = self.queue.get()
+        if text is None: raise StopIteration("RedPajama 資料流已徹底耗盡")
+        return text
 
 # =====================================================================
 # [ 觀測邏輯區 ] 實體拓撲檢驗
@@ -153,10 +186,19 @@ class HyperDriveTopologicalBuilder4K:
             }
             if conf.get("name"): kwargs["name"] = conf["name"]
                 
-            raw_stream = iter(load_dataset(**kwargs))
+            raw_dataset = load_dataset(**kwargs)
             
+            # 🛡️ 突破點：針對 SlimPajama 施加物理層的全局洗牌，打破 Parquet 連續存儲的同質性阻塞
+            if key == "code_redpajama":
+                raw_dataset = raw_dataset.shuffle(seed=RANDOM_SEED, buffer_size=10000)
+                
+            raw_stream = iter(raw_dataset)
+            
+            # 任務分流：將 I/O 與過濾負載全部下放到獨立背景執行緒
             if key == "code_smollm":
                 self.streams[key] = AsyncS3Prefetcher(raw_stream, max_workers=32, queue_size=500)
+            elif key == "code_redpajama":
+                self.streams[key] = AsyncRedPajamaFilter(raw_stream, queue_size=500)
             else:
                 self.streams[key] = raw_stream
 
@@ -167,28 +209,11 @@ class HyperDriveTopologicalBuilder4K:
         ])
 
     def _get_raw_tokens(self, source_type: str) -> List[int]:
-        """🌟 絕對不輪迴：只提取真實且無重複的語義，加入內部自旋鎖定機制"""
+        """🌟 絕對不輪迴：只提取真實且無重複的語義，主線程僅需 O(1) 獲取"""
         try:
-            if source_type == "code_smollm":
+            # 異步預取器已經幫主線程處理好所有下載與淨化作業
+            if source_type in ["code_smollm", "code_redpajama"]:
                 text = self.streams[source_type].get_next_text()
-            elif source_type == "code_redpajama":
-                # 🛡️ 內部自旋鎖定：持續消耗資料流，直到抽中 GitHub 磁區為止，確保配比不被稀釋
-                while True:
-                    sample = next(self.streams[source_type])
-                    
-                    # 容錯解析：標籤可能在頂層，也可能在 meta 欄位中
-                    set_name = sample.get("redpajama_set_name")
-                    if not set_name:
-                        meta = sample.get("meta", {})
-                        if isinstance(meta, str):
-                            try: meta = json.loads(meta)
-                            except: meta = {}
-                        set_name = meta.get("redpajama_set_name", "")
-                    
-                    # 嚴格觀測：命中 GitHub 磁區才跳出迴圈提取文本
-                    if set_name == "RedPajamaGithub":
-                        text = sample.get("text", sample.get("content", sample.get("code", "")))
-                        break
             else:
                 sample = next(self.streams[source_type])
                 text = sample.get("text", sample.get("content", sample.get("code", "")))
