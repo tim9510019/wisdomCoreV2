@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 
 # ==========================================
-# 基礎 SOTA 元件庫 (完美對齊 Gemma 3 1B 物理特性)
+# 基礎 SOTA 元件庫 (對齊 Gemma 3 1B 物理特性)
 # ==========================================
 
 class GemmaRMSNorm(nn.Module):
@@ -58,7 +58,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 # ==========================================
 
 class AGIV2LocalBlock(nn.Module):
-    # 🌟 已切換為 1B 級別優化預設值
+    # 🌟 1B 級別優化預設值
     def __init__(self, D=1536, hidden_dim=6144, C=256, num_heads=6, num_kv_heads=2, head_dim=256):
         super().__init__()
         self.C = C
@@ -156,7 +156,7 @@ class AGIV2LocalBlock(nn.Module):
 
 
 class AGIV2GlobalBlock(nn.Module):
-    # 🌟 已切換為 1B 級別優化預設值
+    # 🌟 1B 級別優化預設值
     def __init__(self, D=1536, hidden_dim=6144, K=256, M=256, C=256, num_heads=6, num_kv_heads=2, head_dim=256):
         super().__init__()
         self.D = D
@@ -178,8 +178,9 @@ class AGIV2GlobalBlock(nn.Module):
         self.q_norm = GemmaRMSNorm(head_dim)
         self.k_norm = GemmaRMSNorm(head_dim)
         
-        self.gate_fft = nn.Parameter(torch.zeros(1)) # 建議從 0 開始，讓殘差穩定
-        self.gate_mem = nn.Parameter(torch.zeros(1)) # 建議從 0 開始，讓殘差穩定
+        # 🚀 修正點 1：將門控初始化為 1，打通初期的反向傳播梯度流 (對齊 AGIV2GAC)
+        self.gate_fft = nn.Parameter(torch.ones(1)) 
+        self.gate_mem = nn.Parameter(torch.ones(1)) 
         
         self.omegas = nn.Parameter(torch.randn(K))
         self.mlp_H = nn.Sequential(
@@ -233,9 +234,7 @@ class AGIV2GlobalBlock(nn.Module):
         Y_f = X_f * torch.conj(H_f)
         Y_sys1 = torch.fft.irfft(Y_f, n=2*L, dim=1).to(dtype)[:, :L, :]
         
-        # 🚀 頻域縮放防護：穩定大模型在長序列下的浮點誤差
-        Y_sys1 = Y_sys1 / math.sqrt(max(L, 1))
-        
+        # 🚀 修正點 2：移除頻域縮放防護 (Y_sys1 / math.sqrt(max(L, 1)))，避免訊號過度衰減
         X_res0 = X + (Y_sys1 * self.gate_fft.to(dtype))
         
         X_res0_past = X_res0 * past_mask.unsqueeze(-1).to(dtype) if past_mask is not None else X_res0
@@ -386,7 +385,7 @@ class AGIV2GlobalBlock(nn.Module):
 # ==========================================
 
 class AGIV2G(nn.Module):
-    # 🌟 已切換為 1B 級別優化預設值
+    # 🌟 1B 級別優化預設值
     def __init__(self, vocab_size=262144, D=1536, hidden_dim=6144, num_blocks=16, C=256, K=256, M=256, num_heads=6, num_kv_heads=2, head_dim=256):
         super().__init__()
         self.D = D
@@ -400,11 +399,11 @@ class AGIV2G(nn.Module):
                 self.blocks.append(AGIV2LocalBlock(D=D, hidden_dim=hidden_dim, C=C, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim))
                 
         self.final_norm = GemmaRMSNorm(D)
-        self.fc_out = nn.Linear(D, vocab_size, bias=False)
         
-        # 🚀 嚴格對齊第一性原理：強制權重綁定 (Weight Tying)
-        # 消除 400M 的冗餘參數，確保模型將運算能力集中於 Transformer 核心
-        self.fc_out.weight = self.embedding.weight
+        # 🚀 修正點 3：解除強制權重綁定 (Weight Tying)
+        # 面對 262,144 的巨大詞表，獨立的 fc_out 能避免巨大的輸出梯度在反向傳播時直接摧毀 Embedding 空間。
+        # 這是 From Scratch 能穩定啟動、CPT 能夠接續收斂的關鍵物理防護。
+        self.fc_out = nn.Linear(D, vocab_size, bias=False)
 
     def forward(self, x, n_split_index=None):
         out = self.embedding(x)
