@@ -1,3 +1,13 @@
 *.pyc
 *.png
 *.pptx
+*.parquet
+*.csv
+*.jsonl
+*.pt
+*.bin
+*.log
+*.md
+*.txt
+*.pdf
+*.html
