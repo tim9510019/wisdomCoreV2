@@ -1,103 +1,106 @@
 """
-cpt4k.py — AGIV2 持續預訓練：第二階 (Intermediate) 4K 數據引擊
+cpt4k.py — AGIV2 持續預訓練：第二階 (Intermediate) 4K 數據引擎 (絕對無重複極限版)
 ===========================================================
 第一性原理實踐：
 1. 視界擴展：維持 N+B 物理長度 4000，強迫啟動全局共振與潛在記憶。
 2. 原生隔絕符徵用：使用 <unused0> 確保零拓撲碰撞與硬體對齊保護。
-3. 絕對雙針合成：動態生成無語義關聯的 UUID 雙針，強制在長脈絡中進行跨度檢索，
-   鍛鍊 Tier-0 Structural Semantic Router 的極端特徵極化能力。
-4. 拓撲分流：混合資料流 (Buffer) 與嚴格區塊 (Block) 雙軌並行。
+3. 極端語義淨化：徹底剔除 QA 與 NIAH，配置 80% Text + 20% Code。
+4. 絕對無重複：完全捨棄 Epoch 輪迴，接入 100BT 文本與巨獸矩陣。
+5. 異質流觀測與純淨過濾：共用 utils 模組打破同質性阻塞。
 """
 import os
 import sys
 import random
-import uuid
 import pyarrow as pa
 import pyarrow.parquet as pq
-from typing import Iterator, Dict, List, Any
+from typing import List
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
+from utils import AsyncS3Prefetcher, AsyncRedPajamaFilter, verify_existing_matrix, get_boundary_ids, find_topological_boundary
+
 # =====================================================================
-# [ 全局配置區 ] 物理隔絕矩陣參數 (Physical Isolation Matrix)
+# [ 全局配置區 ] 可調參數 (Tunable Parameters)
 # =====================================================================
+# 模型與環境設定
 MODEL_ID = "google/gemma-3-1b-it"
 RANDOM_SEED = 2026
-
-# 【核心突破】直接徵用原生空白符號，避免任何實體矩陣干擾
 DOC_SEP_TOKEN = "<unused0>" 
+OUTPUT_DIR = "./agiv2_stage2_4K"
+OUTPUT_FILENAME = "agiv2_stage2_N_B_4K.parquet"
 
-# 定錨 4K 物理長度與總序列數
+# 物理長度與序列總數
 TOTAL_SEQ_LEN = 4000 
 TARGET_SEQUENCES = 2750000 
-OUTPUT_DIR = "./agiv2_stage2_4K"
 
-# 第二階段配比 (Stage 2: Intermediate)
-RATIOS = {"long_text": 0.50, "single_code": 0.30, "long_qa": 0.10, "double_niah": 0.10}
-
-# 數據源升級
+# 資料來源與配比
+RATIOS = {"long_text": 0.80, "code_smollm": 0.10, "code_redpajama": 0.10}
 DATA_SOURCES = {
-    "long_text":   {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-10BT", "split": "train"},
-    "single_code": {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"}, 
-    "long_qa":     {"path": "Open-Orca/OpenOrca", "name": "default", "split": "train"}
-    # double_niah 不需掛載外部資料庫，將以 long_text 為草堆進行實時動態合成
+    "long_text":      {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-100BT", "split": "train"},
+    "code_smollm":    {"path": "HuggingFaceTB/smollm-corpus", "name": "python-edu", "split": "train"},
+    "code_redpajama": {"path": "MBZUAI-LLM/SlimPajama-627B-DC", "name": "default", "split": "train"} 
 }
 
+# 寫入、緩衝與異步效能參數
 WRITE_BATCH_SIZE = 5000 
 BUFFER_WATERMARK = TOTAL_SEQ_LEN * 100 
+ASYNC_MAX_WORKERS = 32
+ASYNC_QUEUE_SIZE = 500
+SHUFFLE_BUFFER_SIZE = 10000
 
-# =====================================================================
-# [ 觀測邏輯區 ] 實體拓撲檢驗
-# =====================================================================
+# 拓撲邊界與目標分割參數 (N)
+TARGET_N_MIN = 1500
+TARGET_N_MAX = 3200
+BOUNDARY_OFFSET_LARGE = 800
+BOUNDARY_MARGIN_LARGE = 100
+BOUNDARY_OFFSET_SMALL = 400
+BOUNDARY_MARGIN_SMALL = 100
 
-def verify_existing_matrix() -> bool:
-    output_file = os.path.join(OUTPUT_DIR, "agiv2_stage2_N_B_4K.parquet")
-    if not os.path.exists(output_file):
-        print("🌌 觀測結果：4K 實體磁區不存在，準備無中生有。")
-        return False
-        
-    try:
-        pf = pq.ParquetFile(output_file)
-        num_rows = pf.metadata.num_rows
-        print(f"📊 當前序列數 (Rows): {num_rows} / 預期序列數: {TARGET_SEQUENCES}")
-        if num_rows >= TARGET_SEQUENCES * 0.99: 
-            print("✅ 拓撲完整性達標！4K 實體矩陣已定錨。")
-            return True
-        return False
-    except Exception as e:
-        print(f"⚠️ 磁區讀取失敗 ({e})。準備啟動引擎覆寫...")
-        return False
+# 實體檢驗設定
+EXACT_MATCH_CHECK = False
 
 # =====================================================================
 # [ 執行邏輯區 ] PyArrow 超光速直寫引擎與動態合成器
 # =====================================================================
-
 class HyperDriveTopologicalBuilder4K:
     def __init__(self):
-        print("🚀 啟動量子疊加態資料引擎：AGIV2 (Stage 2 - 4K 視界擴展與動態雙針)")
+        print("🚀 啟動量子疊加態資料引擎：AGIV2 (Stage 2 - 4K 視界擴展，純淨代碼過濾版)")
         random.seed(RANDOM_SEED)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         
-        # 取得原生預留 ID，保持 100% 矩陣維度穩定
         self.doc_sep_id = self.tokenizer.convert_tokens_to_ids(DOC_SEP_TOKEN)
         print(f"🔗 實體定錨：已將 {DOC_SEP_TOKEN} (ID: {self.doc_sep_id}) 徵用為跨文檔物理隔絕牆。")
 
         self.total_seq_len = TOTAL_SEQ_LEN
-        
-        print("預計算高維度拓撲邊界 Token IDs...")
-        self.boundary_ids = set()
-        boundary_chars = ['\n', '.', '?', '!', ';', '。', '！', '？', '；']
-        for s in boundary_chars + [f" {c}" for c in boundary_chars] + [f"a{c}" for c in boundary_chars]:
-            tokens = self.tokenizer.encode(s, add_special_tokens=False)
-            if tokens: self.boundary_ids.add(tokens[-1]) 
+        self.boundary_ids = get_boundary_ids(self.tokenizer)
 
-        print("掛載開源異質資料流 (Streaming Parquet)...")
+        print("掛載開源巨獸資料流 (Streaming Parquet)...")
         self.streams = {}
         for key, conf in DATA_SOURCES.items():
             kwargs = {"path": conf["path"], "split": conf["split"], "streaming": True}
-            if conf["name"]: kwargs["name"] = conf["name"]
-            self.streams[key] = iter(load_dataset(**kwargs))
+            if conf.get("name"): kwargs["name"] = conf["name"]
+                
+            raw_dataset = load_dataset(**kwargs)
+            
+            if key == "code_redpajama":
+                raw_dataset = raw_dataset.shuffle(seed=RANDOM_SEED, buffer_size=SHUFFLE_BUFFER_SIZE)
+                
+            raw_stream = iter(raw_dataset)
+            
+            if key == "code_smollm":
+                self.streams[key] = AsyncS3Prefetcher(
+                    raw_stream, 
+                    max_workers=ASYNC_MAX_WORKERS, 
+                    queue_size=ASYNC_QUEUE_SIZE
+                )
+            elif key == "code_redpajama":
+                self.streams[key] = AsyncRedPajamaFilter(
+                    raw_stream, 
+                    queue_size=ASYNC_QUEUE_SIZE
+                )
+            else:
+                self.streams[key] = raw_stream
 
         self.schema = pa.schema([
             ('input_ids', pa.list_(pa.int32())),
@@ -106,123 +109,59 @@ class HyperDriveTopologicalBuilder4K:
         ])
 
     def _get_raw_tokens(self, source_type: str) -> List[int]:
-        """從指定的資料流抽取一段原始 Token 序列"""
         try:
-            sample = next(self.streams[source_type])
-            if source_type == "long_qa":
-                text = "\n".join([p for p in (sample.get("system_prompt", ""), sample.get("question", ""), sample.get("response", "")) if p and p.strip()])
+            if source_type in ["code_smollm", "code_redpajama"]:
+                text = self.streams[source_type].get_next_text()
             else:
-                text = sample.get("text", sample.get("prompt", ""))
+                sample = next(self.streams[source_type])
+                text = sample.get("text", sample.get("content", sample.get("code", "")))
+            
+            if not text or not text.strip(): return []
             return self.tokenizer.encode(text, add_special_tokens=False)
+            
         except StopIteration:
-            raise RuntimeError(f"[物理質量枯竭] 資料流 '{source_type}' 已耗盡。")
+            raise RuntimeError(f"[物理質量枯竭] 資料流 '{source_type}' 已徹底耗盡！")
         except Exception:
             return []
 
-    def _generate_dynamic_niah_block(self) -> Dict[str, Any]:
-        """
-        核心突破：實時動態合成雙針矩陣
-        強制構造長度精準為 4000 的獨立序列，確保 N (草堆+針+問題) 與 B (答案) 物理隔絕。
-        """
-        # 1. 鍛造雙針特徵 (採用無規律 UUID 避免預訓練記憶干擾)
-        key_alpha = uuid.uuid4().hex[:8]
-        key_beta = uuid.uuid4().hex[:8]
-        
-        needle_1 = self.tokenizer.encode(f"\n[系統底層日誌：覆寫核心矩陣，存取金鑰 Alpha 為 {key_alpha}]\n", add_special_tokens=False)
-        needle_2 = self.tokenizer.encode(f"\n[系統底層日誌：路由通道解鎖，存取金鑰 Beta 為 {key_beta}]\n", add_special_tokens=False)
-        
-        query = self.tokenizer.encode(f"\n{DOC_SEP_TOKEN}\n[系統查核] 請根據上述文本的底層日誌，精確提取存取金鑰 Alpha 與 Beta。\n答案：", add_special_tokens=False)
-        answer = self.tokenizer.encode(f"金鑰 Alpha 為 {key_alpha}，金鑰 Beta 為 {key_beta}。{DOC_SEP_TOKEN}", add_special_tokens=False)
-        
-        # 2. 計算剩餘草堆容積
-        reserved_len = len(needle_1) + len(needle_2) + len(query) + len(answer)
-        target_haystack_len = self.total_seq_len - reserved_len
-        
-        # 3. 採集足量的背景草堆 (使用 long_text)
-        haystack = []
-        while len(haystack) < target_haystack_len:
-            haystack.extend(self._get_raw_tokens("long_text"))
-            haystack.append(self.doc_sep_id)
-            
-        haystack = haystack[:target_haystack_len] # 精準切斷
-        
-        # 4. 隨機決定雙針的物理深度 (分佈於 10%~40% 與 60%~80% 區間)
-        idx_1 = random.randint(int(target_haystack_len * 0.1), int(target_haystack_len * 0.4))
-        idx_2 = random.randint(int(target_haystack_len * 0.6), int(target_haystack_len * 0.8))
-        
-        # 5. 拓撲重組
-        final_seq = (
-            haystack[:idx_1] + 
-            needle_1 + 
-            haystack[idx_1:idx_2] + 
-            needle_2 + 
-            haystack[idx_2:] + 
-            query + 
-            answer
-        )
-        
-        # 6. 計算絕對隔絕點：剛好在 query 結束、answer 開始的位置
-        n_split = len(final_seq) - len(answer)
-        
-        return {
-            "input_ids": final_seq,
-            "n_split_index": n_split,
-            "b_length": len(answer)
-        }
-
-    def _find_topological_boundary(self, seq: List[int], target_n: int) -> int:
-        for offset in range(800):
-            left_idx, right_idx = target_n - offset, target_n + offset
-            if left_idx > 100 and seq[left_idx] == self.doc_sep_id: return left_idx + 1  
-            if right_idx < len(seq) - 100 and seq[right_idx] == self.doc_sep_id: return right_idx + 1
-
-        for offset in range(400):
-            left_idx, right_idx = target_n - offset, target_n + offset
-            if left_idx > 100 and seq[left_idx] in self.boundary_ids: return left_idx + 1  
-            if right_idx < len(seq) - 100 and seq[right_idx] in self.boundary_ids: return right_idx + 1
-                
-        return target_n
-
     def build_and_save(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        output_file = os.path.join(OUTPUT_DIR, "agiv2_stage2_N_B_4K.parquet")
+        output_file = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
         print(f"準備將 {TARGET_SEQUENCES} 筆 4K 長脈絡教材寫入實體磁區: {output_file}")
         
         seq_count = 0
         batch_data = []
         global_token_buffer = [] 
         
-        # 剝離雙針比例，重新計算常規數據源的權重
-        regular_sources = [k for k in RATIOS.keys() if k != "double_niah"]
-        regular_weights = [RATIOS[k] for k in regular_sources]
+        regular_sources = list(RATIOS.keys())
+        regular_weights = list(RATIOS.values())
         
         with pq.ParquetWriter(output_file, self.schema) as writer:
-            pbar = tqdm(total=TARGET_SEQUENCES, desc="HyperDrive 4K Writing")
+            pbar = tqdm(total=TARGET_SEQUENCES, desc="HyperDrive 4K Writing", smoothing=0.1)
             
             while seq_count < TARGET_SEQUENCES:
-                # 第一層分流：是否觸發動態雙針？
-                if random.random() < RATIOS["double_niah"]:
-                    batch_data.append(self._generate_dynamic_niah_block())
-                else:
-                    # 第二層分流：常規全局緩衝池拼接
-                    while len(global_token_buffer) < self.total_seq_len:
-                        source_type = random.choices(regular_sources, weights=regular_weights, k=1)[0]
-                        doc_tokens = self._get_raw_tokens(source_type)
-                        if doc_tokens:
-                            global_token_buffer.extend(doc_tokens)
-                            global_token_buffer.append(self.doc_sep_id)
-                    
-                    current_seq = global_token_buffer[:self.total_seq_len]
-                    global_token_buffer = global_token_buffer[self.total_seq_len:]
-                    
-                    raw_target_n = random.randint(1500, 3200)
-                    calibrated_n = self._find_topological_boundary(current_seq, raw_target_n)
-                    
-                    batch_data.append({
-                        "input_ids": current_seq,
-                        "n_split_index": calibrated_n, 
-                        "b_length": self.total_seq_len - calibrated_n 
-                    })
+                while len(global_token_buffer) < self.total_seq_len:
+                    source_type = random.choices(regular_sources, weights=regular_weights, k=1)[0]
+                    doc_tokens = self._get_raw_tokens(source_type)
+                    if doc_tokens:
+                        global_token_buffer.extend(doc_tokens)
+                        global_token_buffer.append(self.doc_sep_id)
+                
+                current_seq = global_token_buffer[:self.total_seq_len]
+                global_token_buffer = global_token_buffer[self.total_seq_len:]
+                
+                raw_target_n = random.randint(TARGET_N_MIN, TARGET_N_MAX)
+                calibrated_n = find_topological_boundary(
+                    current_seq, raw_target_n, self.doc_sep_id, self.boundary_ids,
+                    offset_large=BOUNDARY_OFFSET_LARGE, margin_large=BOUNDARY_MARGIN_LARGE, 
+                    offset_small=BOUNDARY_OFFSET_SMALL, margin_small=BOUNDARY_MARGIN_SMALL
+                )
+                
+                batch_data.append({
+                    "input_ids": current_seq,
+                    "n_split_index": calibrated_n, 
+                    "b_length": self.total_seq_len - calibrated_n 
+                })
                 
                 seq_count += 1
                 pbar.update(1)
@@ -237,10 +176,14 @@ class HyperDriveTopologicalBuilder4K:
                 table = pa.Table.from_pylist(batch_data, schema=self.schema)
                 writer.write_table(table)
 
-        print("✅ 算力完全釋放：Stage 2 (4K) 動態雙針拓撲封裝完成。")
+        print("✅ 算力完全釋放：Stage 2 (4K) 絕對無重複拓撲封裝完成。")
 
 if __name__ == "__main__":
-    if verify_existing_matrix(): sys.exit(0)
+    output_f = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
+    if verify_existing_matrix(output_f, TARGET_SEQUENCES, tag="4K 實體", exact_match=EXACT_MATCH_CHECK):
+        sys.exit(0)
+        
     builder = HyperDriveTopologicalBuilder4K()
     builder.build_and_save()
+    
     os._exit(0)
