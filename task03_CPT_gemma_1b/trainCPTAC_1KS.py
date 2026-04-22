@@ -42,6 +42,8 @@ BATCH_SIZE_PER_DEVICE = 2
 GRAD_ACCUMULATION_STEPS = 16       
 LEARNING_RATE = 1e-4               
 
+CHUNK = 256
+
 # ==========================================
 # [ 統一對齊的量子監控器 (CPT 版) ]
 # ==========================================
@@ -160,7 +162,7 @@ def main():
     print(f"✅ 資料映射與絕對隔離完成！訓練集: {len(train_ds):,} 筆 | 獨立驗證集: {len(eval_ds)} 筆")
 
     # 🌟 核心修改點 1：直接實例化，不移植 Gemma 3 參數
-    base = AGIV2G(vocab_size=262144, D=1152, C=256, hidden_dim=6912, num_blocks=26)
+    base = AGIV2G(vocab_size=262144, D=1152, C=CHUNK, hidden_dim=6912, num_blocks=26)
     model = AGIV2GForCausalLM(base, use_gc=True)
     print("✅ 模型實例化完成，採用原生隨機初始化。")
     
