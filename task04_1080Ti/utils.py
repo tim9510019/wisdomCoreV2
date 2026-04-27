@@ -346,6 +346,63 @@ class AGIV2GForCausalLM(nn.Module):
             
         return {"loss": loss, "logits": logits} if logits is not None else {"loss": loss}
 
+class AGIV2GForCausalLMT(nn.Module):
+    def __init__(self, base_model, use_gc=True):
+        super().__init__()
+        self.base_model = base_model
+        self.use_gc = use_gc
+
+    def forward(self, input_ids, labels=None, **kwargs):
+        n_split_index = kwargs.get("n_split_index", None)
+
+        hidden_states = self.base_model.embedding(input_ids)
+        hidden_states = hidden_states * math.sqrt(self.base_model.D)
+        
+        for i, block in enumerate(self.base_model.blocks):
+            shift_size = (block.C // 2) if (i % 2 != 0) else 0
+            if self.training and self.use_gc:
+                hidden_states = checkpoint.checkpoint(
+                    block, hidden_states, shift_size, use_reentrant=False, n_split_index=n_split_index 
+                )
+            else:
+                hidden_states = block(hidden_states, shift_size=shift_size, n_split_index=n_split_index) 
+                
+        hidden_states = self.base_model.final_norm(hidden_states)
+        
+        loss = None
+        logits = None
+        
+        if labels is not None:
+            shift_hidden = hidden_states[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            loss_fct = nn.CrossEntropyLoss(reduction="sum", ignore_index=-100)
+            total_loss = 0.0
+            valid_tokens = 0.0 
+            chunk_size = 2048 
+            seq_len = shift_hidden.size(1)
+            
+            for i in range(0, seq_len, chunk_size):
+                end_idx = min(i + chunk_size, seq_len)
+                c_hidden = shift_hidden[:, i:end_idx, :]
+                c_logits = self.base_model.fc_out(c_hidden)
+                c_labels = shift_labels[:, i:end_idx]
+                
+                c_loss = loss_fct(c_logits.reshape(-1, c_logits.size(-1)).float(), c_labels.reshape(-1))
+                total_loss += c_loss
+                
+                valid_tokens += (c_labels != -100).sum().item()
+                del c_logits, c_hidden
+                
+            loss = total_loss / max(valid_tokens, 1)
+            
+            # 🌟 修改點: 已完全拔除 gate_anchor_loss 懲罰，將主導權還給 CE Loss
+            
+        else:
+            logits = self.base_model.fc_out(hidden_states)
+            
+        return {"loss": loss, "logits": logits} if logits is not None else {"loss": loss}
+
 # ==========================================
 # 2. 權重移植、凍結與動態監控 Callback
 # ==========================================
