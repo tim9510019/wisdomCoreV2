@@ -42,7 +42,7 @@ CHUNK = 256
 MAX_STEPS = 335625                   # 537萬 / (1 * 16) = 335625
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
-SAVE_STEPS = 10                   
+SAVE_STEPS = 100                   
 SAVE_TOTAL_LIMIT = 2               
 LOGGING_STEPS = 1                  
 BATCH_SIZE_PER_DEVICE = 1          # 1080 Ti 11G 建議 1
