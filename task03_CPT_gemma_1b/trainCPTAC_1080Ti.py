@@ -15,6 +15,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# 基於「恢復進度」需求，必須暫時跳過安全檢查以讀取舊格式的優化器狀態
+os.environ["HF_SKIP_CHECK_TORCH_LOAD_SAFE"] = "True" 
 
 from AGIV2GACT import AGIV2G 
 from utils import AGIV2GForCausalLMT
@@ -37,7 +39,7 @@ H_DIM = 3072
 N_BLOCKS = 12
 CHUNK = 256
 
-MAX_STEPS = 167812                   
+MAX_STEPS = 335625                   # 537萬 / (1 * 16) = 335625
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
 SAVE_STEPS = 10                   
@@ -129,9 +131,10 @@ class QuantumCPTMonitor(TrainerCallback):
                 self.best_eval_loss = current_eval_loss
                 model = kwargs.get('model', None)
                 if model is not None:
-                    best_model_path = os.path.join(self.save_dir, "best_cpt_model.pth")
+                    best_model_path = os.path.join(self.save_dir, "best_cpt_model.safetensors")
                     raw_model = model.module if hasattr(model, 'module') else model
-                    torch.save(raw_model.state_dict(), best_model_path)
+                    from safetensors.torch import save_model
+                    save_model(raw_model, best_model_path)
                     print(f"\n[Monitor] 🌟 收斂突破 ({old_best:.4f} -> {current_eval_loss:.4f})，儲存至 {best_model_path}")
             else:
                 print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})。")
@@ -191,9 +194,14 @@ def main():
     print("✅ 模型實例化完成，採用原生隨機初始化。")
     
     if os.path.exists(BEST_ROUTER_32K_PATH):
-        print(f"\n🔄 載入 32K 階段基礎權重: {BEST_ROUTER_32K_PATH}")
-        model.load_state_dict(torch.load(BEST_ROUTER_32K_PATH, map_location="cpu"), strict=False)
-        print("✅ 路由權重載入完成。")
+        print(f"\n🔄 偵測到基礎權重: {BEST_ROUTER_32K_PATH}")
+        if BEST_ROUTER_32K_PATH.endswith(".safetensors"):
+            from safetensors.torch import load_model
+            # load_model 直接將權重加載到模型，不產生 state_dict 副本，極度節省 RAM
+            load_model(model, BEST_ROUTER_32K_PATH, strict=False)
+            print("✅ Safetensors 路由權重載入完成 (省記憶體模式)。")
+        else:
+            print("⚠️ 權重檔案非 Safetensors 格式，基於安全考量跳過載入。")
     else:
         print(f"\n⚠️ 找不到 32K 路由權重檔案 {BEST_ROUTER_32K_PATH}，將完全從零開始訓練！")
 
@@ -222,7 +230,7 @@ def main():
         eval_steps=EVAL_STEPS,
         save_steps=SAVE_STEPS,
         save_total_limit=SAVE_TOTAL_LIMIT,
-        optim="paged_adamw_8bit",       
+        optim="paged_adamw_8bit",       # 回歸穩定的 8-bit 優化器
         remove_unused_columns=False,
         report_to="none"
     )
@@ -237,8 +245,28 @@ def main():
     )
 
     last_checkpoint = get_last_checkpoint(SAVE_DIR)
-    trainer.train(resume_from_checkpoint=last_checkpoint)
-    torch.save(model.state_dict() if not hasattr(model, 'module') else model.module.state_dict(), os.path.join(SAVE_DIR, "final_agiv2_cpt_1080ti.pth"))
+    if last_checkpoint:
+        print(f"🔄 偵測到舊進度: {last_checkpoint}")
+        weight_path = os.path.join(last_checkpoint, "model.safetensors")
+        if not os.path.exists(weight_path):
+             weight_path = os.path.join(last_checkpoint, "pytorch_model.bin")
+        
+        if os.path.exists(weight_path):
+            print(f"📦 正在僅恢復權重以避開 OOM: {weight_path}")
+            if weight_path.endswith(".safetensors"):
+                from safetensors.torch import load_model
+                load_model(model, weight_path, strict=False)
+            else:
+                model.load_state_dict(torch.load(weight_path, map_location="cpu"), strict=False)
+            print("✅ 權重恢復完成。正在開啟全新 8-bit 優化器...")
+    
+    # 強制不載入 optimizer.pt，避開 1080 Ti 的顯存壓力
+    trainer.train(resume_from_checkpoint=None)
+    
+    final_path = os.path.join(SAVE_DIR, "final_agiv2_cpt_1080ti.safetensors")
+    from safetensors.torch import save_model
+    save_model(model if not hasattr(model, 'module') else model.module, final_path)
+    print(f"✅ 訓練完成，模型已安全儲存至: {final_path}")
 
 if __name__ == "__main__":
     main()

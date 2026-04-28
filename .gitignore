@@ -12,3 +12,8 @@
 *.pdf
 *.html
 *bkup*
+*.bkp
+*.drawio
+*.safetensors
+*.pth
+*.json
