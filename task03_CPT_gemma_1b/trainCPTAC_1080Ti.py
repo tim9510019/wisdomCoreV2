@@ -39,13 +39,13 @@ H_DIM = 3072
 N_BLOCKS = 12
 CHUNK = 256
 
-MAX_STEPS = 335625                   # 537萬 / (1 * 16) = 335625
+MAX_STEPS = 167812               
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
 SAVE_STEPS = 100                   
 SAVE_TOTAL_LIMIT = 2               
 LOGGING_STEPS = 1                  
-BATCH_SIZE_PER_DEVICE = 1          # 1080 Ti 11G 建議 1
+BATCH_SIZE_PER_DEVICE = 2          # 1080 Ti 11G 建議 1
 GRAD_ACCUMULATION_STEPS = 16       
 LEARNING_RATE = 2e-4               # 稍微調高以補償較小的模型
 
@@ -140,6 +140,53 @@ class QuantumCPTMonitor(TrainerCallback):
                 print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})。")
 
 # ==========================================
+# [ 滾動式局部訓練控制器 ]
+# ==========================================
+class SlidingWindowTrainingCallback(TrainerCallback):
+    def __init__(self, n_blocks=12, window_size=2, interval=500):
+        self.n_blocks = n_blocks
+        self.window_size = window_size
+        self.interval = interval
+        self.current_index = -1
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        step = state.global_step
+        model = kwargs.get('model', None)
+        if model is None: return
+
+        # 計算當前應該啟動的 Block 索引
+        new_index = (step // self.interval) % self.n_blocks
+
+        if new_index != self.current_index:
+            self.current_index = new_index
+            self.apply_sliding_window(model, new_index)
+
+    def apply_sliding_window(self, model, index):
+        raw_model = model.module if hasattr(model, 'module') else model
+        core_model = raw_model.base_model if hasattr(raw_model, 'base_model') else raw_model
+        
+        # 1. 先全部凍結
+        for param in model.parameters():
+            param.requires_grad = False
+            
+        # 2. 解凍常駐核心 (Embedding & Head) - 體積小但極其重要
+        if hasattr(core_model, 'embed'):
+            for param in core_model.embed.parameters(): param.requires_grad = True
+        if hasattr(raw_model, 'lm_head'):
+            for param in raw_model.lm_head.parameters(): param.requires_grad = True
+
+        # 3. 解凍滾動窗口內的 Blocks
+        active_indices = [(index + i) % self.n_blocks for i in range(self.window_size)]
+        
+        # 顯示當前動態
+        active_str = ", ".join([str(i) for i in active_indices])
+        print(f"\n🔄 [Sliding Window] 步數分界點，切換訓練窗口：啟動 Blocks [{active_str}]")
+
+        for i in active_indices:
+            for param in core_model.blocks[i].parameters():
+                param.requires_grad = True
+
+# ==========================================
 # [ 數據整理 ]
 # ==========================================
 class CPTDataCollator:
@@ -205,12 +252,8 @@ def main():
     else:
         print(f"\n⚠️ 找不到 32K 路由權重檔案 {BEST_ROUTER_32K_PATH}，將完全從零開始訓練！")
 
-    print("\n🔧 啟動全參數訓練設定 (包含動態 Router):")
-    for param in model.parameters():
-        param.requires_grad = True
-        
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"✅ 設定完成。可訓練參數總量: {trainable_params:,} (100% 全開)")
+    # 初始凍結 (由 Callback 接管，這裡先做第一次初始化)
+    print("\n🔧 啟動滾動式局部訓練模式 (Sliding Window Mode)...")
             
     # 1080 Ti 使用 mixed precision (由 fp16=True 處理)
     model = model.cuda()
@@ -230,7 +273,7 @@ def main():
         eval_steps=EVAL_STEPS,
         save_steps=SAVE_STEPS,
         save_total_limit=SAVE_TOTAL_LIMIT,
-        optim="paged_adamw_8bit",       # 回歸穩定的 8-bit 優化器
+        optim="paged_adamw_8bit",       # 回歸最穩定且快速的 8-bit 優化器
         remove_unused_columns=False,
         report_to="none"
     )
@@ -241,7 +284,10 @@ def main():
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=CPTDataCollator(pad_id),   
-        callbacks=[QuantumCPTMonitor(path=LOG_PATH, save_dir=SAVE_DIR)]
+        callbacks=[
+            QuantumCPTMonitor(path=LOG_PATH, save_dir=SAVE_DIR),
+            SlidingWindowTrainingCallback(n_blocks=N_BLOCKS, window_size=1, interval=500)
+        ]
     )
 
     last_checkpoint = get_last_checkpoint(SAVE_DIR)
