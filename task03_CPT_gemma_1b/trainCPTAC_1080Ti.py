@@ -44,7 +44,7 @@ SAVE_STEPS = 100
 SAVE_TOTAL_LIMIT = 2               
 LOGGING_STEPS = 1                  
 BATCH_SIZE_PER_DEVICE = 1          # 1080 Ti 11G 建議 1
-GRAD_ACCUMULATION_STEPS = 32       
+GRAD_ACCUMULATION_STEPS = 16       
 LEARNING_RATE = 2e-4               # 稍微調高以補償較小的模型
 
 # ==========================================
