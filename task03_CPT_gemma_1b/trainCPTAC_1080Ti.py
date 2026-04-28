@@ -185,13 +185,18 @@ class LISATrainingCallback(TrainerCallback):
         if hasattr(raw_model, 'lm_head'):
             for param in raw_model.lm_head.parameters(): param.requires_grad = True
 
-        # 3. 隨機抽取 n_active 個 Blocks 進行「外科手術級更新」
+        # 3. 執行「可恢復式隨機抽樣」
+        # 使用 global_step 決定目前的「窗口索引」，並結合基礎種子
+        window_index = self.last_step // self.interval
+        local_seed = RANDOM_SEED + window_index
+        rng = random.Random(local_seed) # 使用獨立的隨機產生器
+        
         all_indices = list(range(self.n_blocks))
-        active_indices = random.sample(all_indices, self.n_active)
+        active_indices = rng.sample(all_indices, self.n_active)
         
         active_indices.sort()
         active_str = ", ".join([str(i) for i in active_indices])
-        print(f"\n💉 [LISA] 執行隨機層採樣更新：選中 Blocks [{active_str}]")
+        print(f"\n💉 [LISA] 執行隨機層採樣 (種子:{local_seed})：選中 Blocks [{active_str}]")
 
         for i in active_indices:
             for param in core_model.blocks[i].parameters():
