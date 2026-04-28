@@ -4,6 +4,7 @@ import sys
 import csv
 import time
 import torch
+import random
 from transformers import AutoTokenizer, TrainingArguments, Trainer, set_seed, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_dataset 
@@ -21,12 +22,6 @@ os.environ["HF_SKIP_CHECK_TORCH_LOAD_SAFE"] = "True"
 from AGIV2GACT import AGIV2G 
 from utils import AGIV2GForCausalLMT
 
-RANDOM_SEED = 2026
-set_seed(RANDOM_SEED)
-
-# ==========================================
-# [ 1080 Ti 專屬配置區 ] 
-# ==========================================
 # ==========================================
 # [ 核心配置區 - 您可以在這裡調整所有參數 ]
 # ==========================================
@@ -36,7 +31,7 @@ DATASET_DIR = "./agiv2_stage1_1K"
 SAVE_DIR = "./agiv2_cpt_1080Ti_checkpoints"
 LOG_PATH = "./agiv2_cpt_1080Ti_log.csv"
 BEST_ROUTER_32K_PATH = "./agiv2_zerogate_ac_checkpoints_32KST/best_model.pth"
-RANDOM_SEED = 42
+RANDOM_SEED = 2026
 
 # 2. 模型架構 (目標 ~450M 參數)
 D_MODEL = 768
@@ -58,7 +53,9 @@ LOGGING_STEPS = 1
 BATCH_SIZE_PER_DEVICE = 2          
 GRAD_ACCUMULATION_STEPS = 16       
 LEARNING_RATE = 2e-4               
-# ==========================================
+
+# 同步全域隨機種子
+set_seed(RANDOM_SEED)
 
 # ==========================================
 # [ 監控器 ]
@@ -153,8 +150,6 @@ class QuantumCPTMonitor(TrainerCallback):
 # ==========================================
 # [ LISA (Layerwise Importance Sampling) 控制器 ]
 # ==========================================
-import random
-
 class LISATrainingCallback(TrainerCallback):
     def __init__(self, n_blocks=12, n_active=2, interval=100):
         self.n_blocks = n_blocks
