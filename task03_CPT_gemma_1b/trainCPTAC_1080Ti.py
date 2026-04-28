@@ -27,27 +27,38 @@ set_seed(RANDOM_SEED)
 # ==========================================
 # [ 1080 Ti 專屬配置區 ] 
 # ==========================================
-MODEL_ID = "google/gemma-3-1b-it" # 僅使用其 Tokenizer
+# ==========================================
+# [ 核心配置區 - 您可以在這裡調整所有參數 ]
+# ==========================================
+# 1. 路徑與基礎設定
+MODEL_ID = "google/gemma-3-1b-it" 
 DATASET_DIR = "./agiv2_stage1_1K"            
 SAVE_DIR = "./agiv2_cpt_1080Ti_checkpoints"
 LOG_PATH = "./agiv2_cpt_1080Ti_log.csv"
 BEST_ROUTER_32K_PATH = "./agiv2_zerogate_ac_checkpoints_32KST/best_model.pth"
+RANDOM_SEED = 42
 
-# 模型維度下修 (目標 ~450M 參數)
+# 2. 模型架構 (目標 ~450M 參數)
 D_MODEL = 768
 H_DIM = 3072
 N_BLOCKS = 12
 CHUNK = 256
 
-MAX_STEPS = 167812               
+# 3. LISA 演算法設定
+LISA_N_ACTIVE = 2      # 每次同時更新的 Block 數量 (推薦 15% 左右，即 2 層)
+LISA_INTERVAL = 100    # 每隔多少步重新隨機抽樣一次
+
+# 4. 訓練超參數
+MAX_STEPS = 167812                   
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
 SAVE_STEPS = 100                   
 SAVE_TOTAL_LIMIT = 2               
 LOGGING_STEPS = 1                  
-BATCH_SIZE_PER_DEVICE = 2          # 1080 Ti 11G 建議 1
+BATCH_SIZE_PER_DEVICE = 2          
 GRAD_ACCUMULATION_STEPS = 16       
-LEARNING_RATE = 2e-4               # 稍微調高以補償較小的模型
+LEARNING_RATE = 2e-4               
+# ==========================================
 
 # ==========================================
 # [ 監控器 ]
@@ -140,28 +151,27 @@ class QuantumCPTMonitor(TrainerCallback):
                 print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})。")
 
 # ==========================================
-# [ 滾動式局部訓練控制器 ]
+# [ LISA (Layerwise Importance Sampling) 控制器 ]
 # ==========================================
-class SlidingWindowTrainingCallback(TrainerCallback):
-    def __init__(self, n_blocks=12, window_size=2, interval=500):
+import random
+
+class LISATrainingCallback(TrainerCallback):
+    def __init__(self, n_blocks=12, n_active=2, interval=100):
         self.n_blocks = n_blocks
-        self.window_size = window_size
+        self.n_active = n_active
         self.interval = interval
-        self.current_index = -1
+        self.last_step = -1
 
     def on_step_begin(self, args, state, control, **kwargs):
         step = state.global_step
-        model = kwargs.get('model', None)
-        if model is None: return
+        # 每隔 interval 步執行一次隨機抽樣
+        if step % self.interval == 0 and step != self.last_step:
+            self.last_step = step
+            model = kwargs.get('model', None)
+            if model is not None:
+                self.apply_lisa_sampling(model)
 
-        # 計算當前應該啟動的 Block 索引
-        new_index = (step // self.interval) % self.n_blocks
-
-        if new_index != self.current_index:
-            self.current_index = new_index
-            self.apply_sliding_window(model, new_index)
-
-    def apply_sliding_window(self, model, index):
+    def apply_lisa_sampling(self, model):
         raw_model = model.module if hasattr(model, 'module') else model
         core_model = raw_model.base_model if hasattr(raw_model, 'base_model') else raw_model
         
@@ -169,18 +179,19 @@ class SlidingWindowTrainingCallback(TrainerCallback):
         for param in model.parameters():
             param.requires_grad = False
             
-        # 2. 解凍常駐核心 (Embedding & Head) - 體積小但極其重要
+        # 2. 解凍常駐核心 (LISA 建議保留 Embedding 與 Head 以維持基本穩定)
         if hasattr(core_model, 'embed'):
             for param in core_model.embed.parameters(): param.requires_grad = True
         if hasattr(raw_model, 'lm_head'):
             for param in raw_model.lm_head.parameters(): param.requires_grad = True
 
-        # 3. 解凍滾動窗口內的 Blocks
-        active_indices = [(index + i) % self.n_blocks for i in range(self.window_size)]
+        # 3. 隨機抽取 n_active 個 Blocks 進行「外科手術級更新」
+        all_indices = list(range(self.n_blocks))
+        active_indices = random.sample(all_indices, self.n_active)
         
-        # 顯示當前動態
+        active_indices.sort()
         active_str = ", ".join([str(i) for i in active_indices])
-        print(f"\n🔄 [Sliding Window] 步數分界點，切換訓練窗口：啟動 Blocks [{active_str}]")
+        print(f"\n💉 [LISA] 執行隨機層採樣更新：選中 Blocks [{active_str}]")
 
         for i in active_indices:
             for param in core_model.blocks[i].parameters():
@@ -252,8 +263,8 @@ def main():
     else:
         print(f"\n⚠️ 找不到 32K 路由權重檔案 {BEST_ROUTER_32K_PATH}，將完全從零開始訓練！")
 
-    # 初始凍結 (由 Callback 接管，這裡先做第一次初始化)
-    print("\n🔧 啟動滾動式局部訓練模式 (Sliding Window Mode)...")
+    # 初始凍結 (由 Callback 接管)
+    print("\n🔧 啟動 LISA 演算法 (外科手術級隨機層更新模式)...")
             
     # 1080 Ti 使用 mixed precision (由 fp16=True 處理)
     model = model.cuda()
@@ -286,7 +297,7 @@ def main():
         data_collator=CPTDataCollator(pad_id),   
         callbacks=[
             QuantumCPTMonitor(path=LOG_PATH, save_dir=SAVE_DIR),
-            SlidingWindowTrainingCallback(n_blocks=N_BLOCKS, window_size=1, interval=500)
+            LISATrainingCallback(n_blocks=N_BLOCKS, n_active=LISA_N_ACTIVE, interval=LISA_INTERVAL)
         ]
     )
 
