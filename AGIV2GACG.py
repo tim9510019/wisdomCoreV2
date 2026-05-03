@@ -187,6 +187,26 @@ class AGIV2GlobalBlock(nn.Module):
         g_mem = routing_weights[..., 1:2].to(dtype)
         g_fft = routing_weights[..., 2:3].to(dtype)
         
+        # 🌟 核心修改：墊高地板 (保底機制)
+        # 強制規定：無論模型怎麼想偷懶，Mem 的權重絕對不准低於 0.2
+        g_mem = torch.clamp(g_mem, min=0.2)
+        
+        # 2. 🌟 新增：動態能量守恆校準 (Bounded Superposition)
+        # 計算總能量
+        gate_sum = g_loc + g_mem + g_fft 
+
+        # 核心魔法：如果總和小於 1.0 (能量未飽和)，什麼都不做，保持絕對獨立。
+        # 如果總和大於 1.0 (能量面臨膨脹)，則等比例縮放，強制將總和壓回 1.0。
+        # 使用 clamp(min=1.0) 完美實現這個邏輯，不破壞反向傳播的梯度！
+        scale_factor = gate_sum.clamp(min=1.0)
+
+        g_loc = (g_loc / scale_factor).to(dtype)
+        g_mem = (g_mem / scale_factor).to(dtype)
+        g_fft = (g_fft / scale_factor).to(dtype)
+
+        # 這樣您依然擁有非零和博弈的優勢 (Loc 是 0.9 時，Mem 依然可以是 0.1，而不是被 Softmax 逼成 0.001)，
+        # 同時保證了加入主幹的特徵總量永遠不會超過 1.0 倍，完美避開了特徵爆炸！
+        
         # 🌟 新增這三行：將當下 Batch 的動態閘門平均值快取起來，供外部 Monitor 讀取
         self.avg_g_loc = g_loc.mean().detach()
         self.avg_g_mem = g_mem.mean().detach()
