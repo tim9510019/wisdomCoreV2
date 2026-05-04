@@ -8,7 +8,7 @@ from huggingface_hub import HfApi
 REPO_ID = "tim9510019/AGIV2-1300M-blackwell-CPT" 
 
 # 2. 欲上傳的目標路徑
-MODEL_PATH = "./agiv2_cpt_checkpoints_1KST/best_cpt_model.pth"
+MODEL_PATH = "./agiv2_cpt_checkpoints_1KSGT/best_cpt_model.pth"
 
 def main():
     print(f"🚀 啟動 Hugging Face 上傳程序 (將自動使用您剛才登入的憑證)...")
