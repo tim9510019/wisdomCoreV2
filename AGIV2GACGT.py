@@ -3,6 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+# 🌟 官方 FlashAttention 導入
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    raise ImportError("請確定已安裝 flash-attn 套件: pip install flash-attn --no-build-isolation")
+
 # ==========================================
 # 基礎 SOTA 元件庫 (完美對齊 Gemma 3 1B 物理特性)
 # ==========================================
@@ -74,57 +80,32 @@ class AGIV2LocalBlock(nn.Module):
 
     def forward(self, X, shift_size=0, n_split_index=None):
         B, L, D = X.shape
-        device = X.device
         
         normed_X = self.input_layernorm(X)
-        pad_len = (self.C - L % self.C) % self.C
-        Z = F.pad(normed_X, (0, 0, 0, pad_len)) if pad_len > 0 else normed_X
-        L_pad = L + pad_len
-        N = L_pad // self.C
         
-        Q = self.W_q_loc(Z).view(B, L_pad, self.num_heads, self.head_dim)
-        K = self.W_k_loc(Z).view(B, L_pad, self.num_kv_heads, self.head_dim)
-        V = self.W_v_loc(Z).view(B, L_pad, self.num_kv_heads, self.head_dim)
+        # 🌟 直接提取 Q, K, V，不手動 Padding
+        Q = self.W_q_loc(normed_X).view(B, L, self.num_heads, self.head_dim)
+        K = self.W_k_loc(normed_X).view(B, L, self.num_kv_heads, self.head_dim)
+        V = self.W_v_loc(normed_X).view(B, L, self.num_kv_heads, self.head_dim)
+        
         Q = self.q_norm(Q)
         K = self.k_norm(K)
-        Q = apply_rope(Q, self.head_dim)
-        K = apply_rope(K, self.head_dim)
-        K = repeat_kv(K, self.num_key_value_groups)
-        V = repeat_kv(V, self.num_key_value_groups)
         
-        if shift_size > 0:
-            Q = torch.roll(Q, shifts=-shift_size, dims=1)
-            K = torch.roll(K, shifts=-shift_size, dims=1)
-            V = torch.roll(V, shifts=-shift_size, dims=1)
-            
-        Q_c = Q.view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3) 
-        K_c = K.view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
-        V_c = V.view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
+        # 確保記憶體連續性 (Contiguous) 以符合 FlashAttention 底層要求
+        Q = apply_rope(Q, self.head_dim).contiguous()
+        K = apply_rope(K, self.head_dim).contiguous()
+        V = V.contiguous()
         
-        scale_factor = math.sqrt(math.sqrt(self.head_dim) * 50.0)
-        Q_c_scaled = Q_c / scale_factor
-        K_c_scaled = K_c / scale_factor
-        attn_weights = torch.matmul(Q_c_scaled, K_c_scaled.transpose(-1, -2))
-        attn_weights = torch.tanh(attn_weights) * 50.0 
+        # 🌟 OOM 免疫與極致加速：調用官方 FlashAttention，使用原生因果滑動窗口
+        attn_out = flash_attn_func(
+            Q, K, V, 
+            dropout_p=0.0, 
+            causal=True, 
+            window_size=(self.C - 1, 0)
+        )
         
-        causal_mask = torch.tril(torch.ones((self.C, self.C), device=device, dtype=torch.bool))
-        if shift_size > 0:
-            region_idx = torch.zeros(L_pad, device=device)
-            region_idx[-shift_size:] = 1 
-            mask_windows = region_idx.view(1, N, 1, self.C, 1)
-            shift_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
-            sdpa_mask = shift_mask & causal_mask.view(1, 1, 1, self.C, self.C)
-        else:
-            sdpa_mask = causal_mask.view(1, 1, 1, self.C, self.C)
-            
-        attn_weights = attn_weights.masked_fill(~sdpa_mask, torch.finfo(attn_weights.dtype).min)
-        attn_probs = F.softmax(attn_weights, dim=-1)
-        Z_hat_chunked = torch.matmul(attn_probs, V_c) 
-        Z_hat_chunked = Z_hat_chunked.transpose(2, 3).reshape(B, L_pad, self.num_heads * self.head_dim)
-        Z_hat_shifted = self.o_proj_loc(Z_hat_chunked)
-        Z_hat = torch.roll(Z_hat_shifted, shifts=shift_size, dims=1) if shift_size > 0 else Z_hat_shifted
-        
-        if pad_len > 0: Z_hat = Z_hat[:, :L, :]
+        # 🌟 核心修正：將 1024 維的工作空間，映射回 D = 1152 的主線空間
+        Z_hat = self.o_proj_loc(attn_out.reshape(B, L, self.num_heads * self.head_dim))
             
         X_res1 = X + self.post_attention_layernorm(Z_hat)
         normed_X_ffn = self.pre_feedforward_layernorm(X_res1)
@@ -152,16 +133,9 @@ class AGIV2GlobalBlock(nn.Module):
         self.q_norm = GemmaRMSNorm(head_dim)
         self.k_norm = GemmaRMSNorm(head_dim)
         
-        # 路由與溫度設定
         self.router = nn.Linear(D, 3, bias=False)
-        nn.init.normal_(self.router.weight, mean=0.0, std=0.001)
-        self.register_buffer('temperature', torch.tensor(2.0))
-        
-        # 🌟 核心進化：動態意圖閘門 (Dynamic Intent Gate)
-        # 用來讓每個 Token 根據自身的上下文 Z_hat，決定要吸收多少 FFT 宏觀意圖
-        self.intent_gate_proj = nn.Linear(D, 1, bias=False)
-        # 初始化為微小的負值，讓訓練初期的閘門處於約 0.1~0.2 的弱開啟狀態，避免一開始就嚴重干擾
-        nn.init.normal_(self.intent_gate_proj.weight, mean=-0.05, std=0.01)
+        nn.init.normal_(self.router.weight, mean=0.0, std=0.001) 
+        self.register_buffer('temperature', torch.tensor(2.0)) 
         
         self.omegas = nn.Parameter(torch.randn(K))
         self.mlp_H = nn.Sequential(nn.Linear(2 * K, D), nn.GELU(), nn.Linear(D, D))
@@ -186,23 +160,12 @@ class AGIV2GlobalBlock(nn.Module):
         device = X.device
         dtype = X.dtype
         
-        # 納許均衡路由分配
+        # 路由分配
         gate_logits = self.router(X)
-        routing_weights = F.sigmoid(gate_logits / self.temperature)
-        g_loc = routing_weights[..., 0:1].to(dtype)
+        routing_weights = F.softmax(gate_logits / self.temperature, dim=-1)
+        g_loc = routing_weights[..., 0:1].to(dtype) 
         g_mem = routing_weights[..., 1:2].to(dtype)
         g_fft = routing_weights[..., 2:3].to(dtype)
-        
-        # 墊高地板 (防止幻覺斷流)
-        g_mem = torch.clamp(g_mem, min=0.2)
-        
-        # 動態能量守恆校準 (防止特徵爆炸)
-        gate_sum = g_loc + g_mem + g_fft 
-        scale_factor = gate_sum.clamp(min=1.0)
-
-        g_loc = (g_loc / scale_factor).to(dtype)
-        g_mem = (g_mem / scale_factor).to(dtype)
-        g_fft = (g_fft / scale_factor).to(dtype)
         
         self.avg_g_loc = g_loc.mean().detach()
         self.avg_g_mem = g_mem.mean().detach()
@@ -233,9 +196,6 @@ class AGIV2GlobalBlock(nn.Module):
         Y_sys1 = torch.fft.irfft(Y_f, n=2*L, dim=1).to(dtype)[:, :L, :]
         
         X_res0 = X + (Y_sys1 * g_fft)
-        
-        # 提取全域意圖 (平均頻譜特徵)
-        global_intent = Y_sys1.mean(dim=1, keepdim=True) # [B, 1, D]
         
         # ==========================================
         # [Phase II] 潛在記憶池
@@ -286,67 +246,37 @@ class AGIV2GlobalBlock(nn.Module):
         # [Phase III] Local + Cross 注意力
         # ==========================================
         normed_X_loc = self.input_layernorm(X_res0)
-        pad_len = mem_pad  
-        Z = F.pad(normed_X_loc, (0, 0, 0, pad_len)) if pad_len > 0 else normed_X_loc
-        L_pad = L_mem_pad
-        N = N_mem
         
-        Q_loc = self.W_q_loc(Z).view(B, L_pad, self.num_heads, self.head_dim)
-        K_loc = self.W_k_loc(Z).view(B, L_pad, self.num_kv_heads, self.head_dim)
-        V_loc = self.W_v_loc(Z).view(B, L_pad, self.num_kv_heads, self.head_dim)
+        Q_loc = self.W_q_loc(normed_X_loc).view(B, L, self.num_heads, self.head_dim)
+        K_loc = self.W_k_loc(normed_X_loc).view(B, L, self.num_kv_heads, self.head_dim)
+        V_loc = self.W_v_loc(normed_X_loc).view(B, L, self.num_kv_heads, self.head_dim)
+        
         Q_loc = self.q_norm(Q_loc)
         K_loc = self.k_norm(K_loc)
-        Q_loc = apply_rope(Q_loc, self.head_dim)
-        K_loc = apply_rope(K_loc, self.head_dim)
-        K_loc = repeat_kv(K_loc, self.num_key_value_groups)
-        V_loc = repeat_kv(V_loc, self.num_key_value_groups)
         
-        if shift_size > 0:
-            Q_loc = torch.roll(Q_loc, shifts=-shift_size, dims=1)
-            K_loc = torch.roll(K_loc, shifts=-shift_size, dims=1)
-            V_loc = torch.roll(V_loc, shifts=-shift_size, dims=1)
-            
-        Q_c = Q_loc.view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
-        K_c = K_loc.view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
-        V_c = V_loc.view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
+        Q_loc = apply_rope(Q_loc, self.head_dim).contiguous()
+        K_loc = apply_rope(K_loc, self.head_dim).contiguous()
+        V_loc = V_loc.contiguous()
         
-        scale_factor_sdpa = math.sqrt(math.sqrt(self.head_dim) * 50.0)
-        Q_c_scaled = Q_c / scale_factor_sdpa
-        K_c_scaled = K_c / scale_factor_sdpa
-        attn_weights = torch.matmul(Q_c_scaled, K_c_scaled.transpose(-1, -2))
-        attn_weights = torch.tanh(attn_weights) * 50.0
+        # 🌟 使用 FlashAttention 處理 L x L 的局部視角
+        attn_out_loc = flash_attn_func(
+            Q_loc, K_loc, V_loc, 
+            dropout_p=0.0, 
+            causal=True, 
+            window_size=(self.C - 1, 0)
+        )
         
-        causal_mask = torch.tril(torch.ones((self.C, self.C), device=device, dtype=torch.bool))
-        if shift_size > 0:
-            region_idx = torch.zeros(L_pad, device=device)
-            region_idx[-shift_size:] = 1 
-            mask_windows = region_idx.view(1, N, 1, self.C, 1)
-            shift_mask = (mask_windows == mask_windows.transpose(-1, -2)) 
-            sdpa_mask = shift_mask & causal_mask.view(1, 1, 1, self.C, self.C)
-        else:
-            sdpa_mask = causal_mask.view(1, 1, 1, self.C, self.C)
-            
-        attn_weights = attn_weights.masked_fill(~sdpa_mask, torch.finfo(attn_weights.dtype).min)
-        attn_probs = F.softmax(attn_weights, dim=-1)
+        # 🌟 核心修正：正確映射回 D = 1152
+        Z_hat = self.o_proj_loc(attn_out_loc.reshape(B, L, self.num_heads * self.head_dim))
         
-        Z_hat_chunked = torch.matmul(attn_probs, V_c)
-        Z_hat_chunked = Z_hat_chunked.transpose(2, 3).reshape(B, L_pad, self.num_heads * self.head_dim)
-        Z_hat_shifted = self.o_proj_loc(Z_hat_chunked)
-        Z_hat = torch.roll(Z_hat_shifted, shifts=shift_size, dims=1) if shift_size > 0 else Z_hat_shifted
+        # --- 為了與 N_mem 對齊進行 Cross Attention，對 Z_hat 進行補齊 ---
+        Z_hat_pad = F.pad(Z_hat, (0, 0, 0, mem_pad)) if mem_pad > 0 else Z_hat
+        Z_hat_chunks = Z_hat_pad.view(B, N_mem, self.C, -1)
         
-        # 🌟 Token 級別動態意圖錨定 (Dynamic Feature Anchoring)
-        # 1. 投影提取當下每個 Token 渴求宏觀意圖的程度
-        intent_gate = torch.sigmoid(self.intent_gate_proj(Z_hat)) # Shape: [B, L_pad, 1]
+        Q_cross = self.W_q_cross(Z_hat_chunks).view(B * N_mem, self.C, self.num_heads, self.head_dim)
+        K_cross = self.W_k_cross(M_global).view(B * N_mem, self.M, self.num_kv_heads, self.head_dim)
+        V_cross = self.W_v_cross(M_global).view(B * N_mem, self.M, self.num_kv_heads, self.head_dim)
         
-        # 2. 以動態閘門融合局部文法與全局意圖
-        anchored_Z_hat = Z_hat + (global_intent * intent_gate)
-        
-        # 3. 帶著「被錨定」的特徵，出發前往記憶池提取資料
-        Z_hat_chunks = anchored_Z_hat.view(B, N, self.C, -1)
-        Q_cross = self.W_q_cross(Z_hat_chunks).view(B * N, self.C, self.num_heads, self.head_dim)
-        
-        K_cross = self.W_k_cross(M_global).view(B * N, self.M, self.num_kv_heads, self.head_dim)
-        V_cross = self.W_v_cross(M_global).view(B * N, self.M, self.num_kv_heads, self.head_dim)
         K_cross = repeat_kv(K_cross, self.num_key_value_groups)
         V_cross = repeat_kv(V_cross, self.num_key_value_groups)
         
@@ -355,11 +285,10 @@ class AGIV2GlobalBlock(nn.Module):
         V_cross = V_cross.transpose(1, 2)
         
         I_cross = F.scaled_dot_product_attention(Q_cross, K_cross, V_cross, dropout_p=0.0, is_causal=False)
-        I_cross = I_cross.transpose(1, 2).reshape(B, L_pad, self.num_heads * self.head_dim)
+        I_cross = I_cross.transpose(1, 2).reshape(B, L_mem_pad, self.num_heads * self.head_dim)
         I_cross = self.o_proj_cross(I_cross)
         
-        if pad_len > 0:
-            Z_hat = Z_hat[:, :L, :]
+        if mem_pad > 0:
             I_cross = I_cross[:, :L, :]
             
         attn_out = (Z_hat * g_loc) + (I_cross * g_mem)
@@ -395,8 +324,7 @@ class AGIV2G(nn.Module):
         out = self.embedding(x)
         out = out * math.sqrt(self.D) 
         for i, block in enumerate(self.blocks):
-            shift_size = (block.C // 2) if (i % 2 != 0) else 0
-            out = block(out, shift_size=shift_size, n_split_index=n_split_index)
+            out = block(out, shift_size=0, n_split_index=n_split_index)
         out = self.final_norm(out)
         logits = self.fc_out(out)
         logits = logits / 30.0
