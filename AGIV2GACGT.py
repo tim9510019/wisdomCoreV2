@@ -307,7 +307,7 @@ class AGIV2G(nn.Module):
         self.blocks = nn.ModuleList()
         
         for i in range(num_blocks):
-            if (i + 1) % 4 == 0:
+            if (i + 1) % 6 == 0:
                 self.blocks.append(AGIV2GlobalBlock(D=D, hidden_dim=hidden_dim, K=K, M=M, C=C, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim))
             else:
                 self.blocks.append(AGIV2LocalBlock(D=D, hidden_dim=hidden_dim, C=C, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim))

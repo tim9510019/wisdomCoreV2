@@ -3,10 +3,6 @@ import os
 import sys
 import csv
 import time
-import torch
-from transformers import AutoTokenizer, TrainingArguments, Trainer, set_seed, TrainerCallback
-from transformers.trainer_utils import get_last_checkpoint
-from datasets import load_dataset 
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -14,6 +10,11 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 os.environ["CUDA_VISIBLE_DEVICES"] = "1" 
 os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+import torch
+from transformers import AutoTokenizer, TrainingArguments, Trainer, set_seed, TrainerCallback
+from transformers.trainer_utils import get_last_checkpoint
+from datasets import load_dataset 
 
 from AGIV2GACGT import AGIV2G 
 from utils import AGIV2GForCausalLMT
@@ -33,7 +34,7 @@ BEST_ROUTER_32K_PATH = "./agiv2_zerogate_ac_checkpoints_32KSGT/best_model.pth"
 MAX_STEPS = 167812                   
 WARMUP_STEPS = 500                 
 EVAL_STEPS = 100                   
-SAVE_STEPS = 100                   
+SAVE_STEPS = 5                   
 SAVE_TOTAL_LIMIT = 2               
 LOGGING_STEPS = 1                  
 BATCH_SIZE_PER_DEVICE = 2          
@@ -240,7 +241,7 @@ def main():
         data_collator=CPTDataCollator(pad_id),   
         callbacks=[
             QuantumCPTMonitor(path=LOG_PATH, save_dir=SAVE_DIR),
-            ThermalControlCallback(delay_seconds=3) # 🛡️ 植入 1.5 秒硬體保護控制器
+            ThermalControlCallback(delay_seconds=2.3) # 🛡️ 植入 1.5 秒硬體保護控制器
         ]
     )
 
