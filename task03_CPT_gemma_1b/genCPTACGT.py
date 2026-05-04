@@ -18,7 +18,7 @@ from datasets import load_dataset
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from AGIV2GACT import AGIV2G
+from AGIV2GACGT import AGIV2G
 from utils import AGIV2GForCausalLMT
 
 # ==========================================
@@ -26,7 +26,7 @@ from utils import AGIV2GForCausalLMT
 # ==========================================
 # --- 1. 路徑與基礎設定 ---
 MODEL_ID = "google/gemma-3-1b-it" 
-CHECKPOINT_PATH = "./agiv2_cpt_checkpoints_1KST/best_cpt_model.pth"
+CHECKPOINT_PATH = "./agiv2_cpt_checkpoints_1KSGT/best_cpt_model.pth"
 DATASET_PATH = "./agiv2_stage1_1K/agiv2_stage1_N_B.parquet"
 RANDOM_SEED = 2026
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

@@ -15,7 +15,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-from AGIV2GACG import AGIV2G 
+from AGIV2GACGT import AGIV2G 
 from utils import AGIV2GForCausalLMT
 
 RANDOM_SEED = 2026
@@ -26,9 +26,9 @@ set_seed(RANDOM_SEED)
 # ==========================================
 MODEL_ID = "google/gemma-3-1b-it" 
 DATASET_DIR = "./agiv2_stage1_1K"            
-SAVE_DIR = "./agiv2_cpt_checkpoints_1KSG"
-LOG_PATH = "./agiv2_cpt_1kSG_log.csv"
-BEST_ROUTER_32K_PATH = "./agiv2_zerogate_ac_checkpoints_32KSG/best_model.pth"
+SAVE_DIR = "./agiv2_cpt_checkpoints_1KSGT"
+LOG_PATH = "./agiv2_cpt_1kSGT_log.csv"
+BEST_ROUTER_32K_PATH = "./agiv2_zerogate_ac_checkpoints_32KSGT/best_model.pth"
 
 MAX_STEPS = 167812                   
 WARMUP_STEPS = 500                 

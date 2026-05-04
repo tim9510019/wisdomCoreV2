@@ -152,10 +152,16 @@ class AGIV2GlobalBlock(nn.Module):
         self.q_norm = GemmaRMSNorm(head_dim)
         self.k_norm = GemmaRMSNorm(head_dim)
         
-        # 🌟 修改點 1: 移除靜態閘門，加入動態 Router 與 退火溫度 (Temperature)
+        # 路由與溫度設定
         self.router = nn.Linear(D, 3, bias=False)
-        nn.init.normal_(self.router.weight, mean=0.0, std=0.001) # 初始為零疊加態
-        self.register_buffer('temperature', torch.tensor(2.0)) # 初始高溫
+        nn.init.normal_(self.router.weight, mean=0.0, std=0.001)
+        self.register_buffer('temperature', torch.tensor(2.0))
+        
+        # 🌟 核心進化：動態意圖閘門 (Dynamic Intent Gate)
+        # 用來讓每個 Token 根據自身的上下文 Z_hat，決定要吸收多少 FFT 宏觀意圖
+        self.intent_gate_proj = nn.Linear(D, 1, bias=False)
+        # 初始化為微小的負值，讓訓練初期的閘門處於約 0.1~0.2 的弱開啟狀態，避免一開始就嚴重干擾
+        nn.init.normal_(self.intent_gate_proj.weight, mean=-0.05, std=0.01)
         
         self.omegas = nn.Parameter(torch.randn(K))
         self.mlp_H = nn.Sequential(nn.Linear(2 * K, D), nn.GELU(), nn.Linear(D, D))
@@ -180,34 +186,24 @@ class AGIV2GlobalBlock(nn.Module):
         device = X.device
         dtype = X.dtype
         
-        # 🌟 修改點 2: 計算 Token-level 納許均衡路由分配 (絕對因果安全)
-        gate_logits = self.router(X) # [B, L, 3]
+        # 納許均衡路由分配
+        gate_logits = self.router(X)
         routing_weights = F.sigmoid(gate_logits / self.temperature)
-        g_loc = routing_weights[..., 0:1].to(dtype) # [B, L, 1]
+        g_loc = routing_weights[..., 0:1].to(dtype)
         g_mem = routing_weights[..., 1:2].to(dtype)
         g_fft = routing_weights[..., 2:3].to(dtype)
         
-        # 🌟 核心修改：墊高地板 (保底機制)
-        # 強制規定：無論模型怎麼想偷懶，Mem 的權重絕對不准低於 0.2
+        # 墊高地板 (防止幻覺斷流)
         g_mem = torch.clamp(g_mem, min=0.2)
         
-        # 2. 🌟 新增：動態能量守恆校準 (Bounded Superposition)
-        # 計算總能量
+        # 動態能量守恆校準 (防止特徵爆炸)
         gate_sum = g_loc + g_mem + g_fft 
-
-        # 核心魔法：如果總和小於 1.0 (能量未飽和)，什麼都不做，保持絕對獨立。
-        # 如果總和大於 1.0 (能量面臨膨脹)，則等比例縮放，強制將總和壓回 1.0。
-        # 使用 clamp(min=1.0) 完美實現這個邏輯，不破壞反向傳播的梯度！
         scale_factor = gate_sum.clamp(min=1.0)
 
         g_loc = (g_loc / scale_factor).to(dtype)
         g_mem = (g_mem / scale_factor).to(dtype)
         g_fft = (g_fft / scale_factor).to(dtype)
-
-        # 這樣您依然擁有非零和博弈的優勢 (Loc 是 0.9 時，Mem 依然可以是 0.1，而不是被 Softmax 逼成 0.001)，
-        # 同時保證了加入主幹的特徵總量永遠不會超過 1.0 倍，完美避開了特徵爆炸！
         
-        # 🌟 新增這三行：將當下 Batch 的動態閘門平均值快取起來，供外部 Monitor 讀取
         self.avg_g_loc = g_loc.mean().detach()
         self.avg_g_mem = g_mem.mean().detach()
         self.avg_g_fft = g_fft.mean().detach()
@@ -220,7 +216,9 @@ class AGIV2GlobalBlock(nn.Module):
             X_past = X
             past_mask = None
             
+        # ==========================================
         # [Phase I] FFT 分支
+        # ==========================================
         normed_X_fft = self.fft_norm(X_past)
         t = torch.arange(L, device=device, dtype=torch.float32)
         args = t.unsqueeze(1) * self.omegas.unsqueeze(0).to(torch.float32)
@@ -234,10 +232,14 @@ class AGIV2GlobalBlock(nn.Module):
         Y_f = X_f * torch.conj(H_f)
         Y_sys1 = torch.fft.irfft(Y_f, n=2*L, dim=1).to(dtype)[:, :L, :]
         
-        # 🌟 動態分配：FFT 閘門注入 (保證總和競爭)
         X_res0 = X + (Y_sys1 * g_fft)
         
+        # 提取全域意圖 (平均頻譜特徵)
+        global_intent = Y_sys1.mean(dim=1, keepdim=True) # [B, 1, D]
+        
+        # ==========================================
         # [Phase II] 潛在記憶池
+        # ==========================================
         X_res0_past = X_res0 * past_mask.unsqueeze(-1).to(dtype) if past_mask is not None else X_res0
         normed_X_mem = self.mem_norm(X_res0_past)
         K_mem = self.W_k_mem(normed_X_mem)
@@ -280,7 +282,9 @@ class AGIV2GlobalBlock(nn.Module):
             
         M_global = M_global_single.expand(-1, N_mem, -1, -1)
         
+        # ==========================================
         # [Phase III] Local + Cross 注意力
+        # ==========================================
         normed_X_loc = self.input_layernorm(X_res0)
         pad_len = mem_pad  
         Z = F.pad(normed_X_loc, (0, 0, 0, pad_len)) if pad_len > 0 else normed_X_loc
@@ -306,9 +310,9 @@ class AGIV2GlobalBlock(nn.Module):
         K_c = K_loc.view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
         V_c = V_loc.view(B, N, self.C, self.num_heads, self.head_dim).transpose(2, 3)
         
-        scale_factor = math.sqrt(math.sqrt(self.head_dim) * 50.0)
-        Q_c_scaled = Q_c / scale_factor
-        K_c_scaled = K_c / scale_factor
+        scale_factor_sdpa = math.sqrt(math.sqrt(self.head_dim) * 50.0)
+        Q_c_scaled = Q_c / scale_factor_sdpa
+        K_c_scaled = K_c / scale_factor_sdpa
         attn_weights = torch.matmul(Q_c_scaled, K_c_scaled.transpose(-1, -2))
         attn_weights = torch.tanh(attn_weights) * 50.0
         
@@ -330,8 +334,17 @@ class AGIV2GlobalBlock(nn.Module):
         Z_hat_shifted = self.o_proj_loc(Z_hat_chunked)
         Z_hat = torch.roll(Z_hat_shifted, shifts=shift_size, dims=1) if shift_size > 0 else Z_hat_shifted
         
-        Z_hat_chunks = Z_hat.view(B, N, self.C, -1)
+        # 🌟 Token 級別動態意圖錨定 (Dynamic Feature Anchoring)
+        # 1. 投影提取當下每個 Token 渴求宏觀意圖的程度
+        intent_gate = torch.sigmoid(self.intent_gate_proj(Z_hat)) # Shape: [B, L_pad, 1]
+        
+        # 2. 以動態閘門融合局部文法與全局意圖
+        anchored_Z_hat = Z_hat + (global_intent * intent_gate)
+        
+        # 3. 帶著「被錨定」的特徵，出發前往記憶池提取資料
+        Z_hat_chunks = anchored_Z_hat.view(B, N, self.C, -1)
         Q_cross = self.W_q_cross(Z_hat_chunks).view(B * N, self.C, self.num_heads, self.head_dim)
+        
         K_cross = self.W_k_cross(M_global).view(B * N, self.M, self.num_kv_heads, self.head_dim)
         V_cross = self.W_v_cross(M_global).view(B * N, self.M, self.num_kv_heads, self.head_dim)
         K_cross = repeat_kv(K_cross, self.num_key_value_groups)
@@ -349,7 +362,6 @@ class AGIV2GlobalBlock(nn.Module):
             Z_hat = Z_hat[:, :L, :]
             I_cross = I_cross[:, :L, :]
             
-        # 🌟 動態分配：Local 與 MEM 閘門注入融合 (兩者 + FFT 總和為 1)
         attn_out = (Z_hat * g_loc) + (I_cross * g_mem)
         X_res1 = X_res0 + self.post_attention_layernorm(attn_out)
         
@@ -374,7 +386,6 @@ class AGIV2G(nn.Module):
         self.final_norm = GemmaRMSNorm(D)
         self.fc_out = nn.Linear(D, vocab_size, bias=False)
 
-    # 🌟 修改點 3: 增加全域溫度設置方法
     def set_temperature(self, temp):
         for block in self.blocks:
             if hasattr(block, 'temperature'):
