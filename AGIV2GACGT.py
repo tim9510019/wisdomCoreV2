@@ -159,13 +159,24 @@ class AGIV2GlobalBlock(nn.Module):
         B, L, D = X.shape
         device = X.device
         dtype = X.dtype
-        
-        # 路由分配
+
+        # 納許均衡路由分配
         gate_logits = self.router(X)
-        routing_weights = F.softmax(gate_logits / self.temperature, dim=-1)
-        g_loc = routing_weights[..., 0:1].to(dtype) 
+        routing_weights = F.sigmoid(gate_logits / self.temperature)
+        g_loc = routing_weights[..., 0:1].to(dtype)
         g_mem = routing_weights[..., 1:2].to(dtype)
         g_fft = routing_weights[..., 2:3].to(dtype)
+        
+        # 墊高地板 (防止幻覺斷流)
+        g_mem = torch.clamp(g_mem, min=0.2)
+        
+        # 動態能量守恆校準 (防止特徵爆炸)
+        gate_sum = g_loc + g_mem + g_fft 
+        scale_factor = gate_sum.clamp(min=1.0)
+
+        g_loc = (g_loc / scale_factor).to(dtype)
+        g_mem = (g_mem / scale_factor).to(dtype)
+        g_fft = (g_fft / scale_factor).to(dtype)
         
         self.avg_g_loc = g_loc.mean().detach()
         self.avg_g_mem = g_mem.mean().detach()
