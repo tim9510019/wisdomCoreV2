@@ -3,6 +3,7 @@ import os
 import sys
 import csv
 import time
+import threading
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -12,6 +13,7 @@ os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
+from huggingface_hub import HfApi
 from transformers import AutoTokenizer, TrainingArguments, Trainer, set_seed, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_dataset 
@@ -41,6 +43,11 @@ BATCH_SIZE_PER_DEVICE = 2
 GRAD_ACCUMULATION_STEPS = 16       
 LEARNING_RATE = 1e-4               
 CHUNK = 256
+GATE_ENTROPY_LAMBDA = 0.1          # 閘門負熵正則化權重 λ
+
+# HuggingFace 自動上傳配置
+REPO_ID = "tim9510019/AGIV2-1300M-blackwell-CPT_GT"
+HF_CE_LOSS_THRESHOLD = 3.9          # 只有 ce_loss 低於此值才觸發上傳
 
 # ==========================================
 # [ 硬體保護：主動式散熱控制器 ]
@@ -80,7 +87,7 @@ class QuantumCPTMonitor(TrainerCallback):
         else:
             with open(self.path, 'w', newline='') as f:
                 # CSV 標題改為記錄三個動態閘門的分量
-                csv.writer(f).writerow(['step', 'loss', 'eval_loss', 'g_loc', 'g_mem', 'g_fft', 'time'])
+                csv.writer(f).writerow(['step', 'loss', 'ce_loss', 'gate_ent_loss', 'eval_loss', 'g_loc', 'g_mem', 'g_fft', 'time'])
 
     def on_step_begin(self, args, state, control, **kwargs):
         model = kwargs.get('model', None)
@@ -122,10 +129,24 @@ class QuantumCPTMonitor(TrainerCallback):
             logs["g_mem"] = round(g_mem_avg, 4)
             logs["g_fft"] = round(g_fft_avg, 4)
             
+            # 🌟 從模型側通道讀取分離的 CE loss 與閘門負熵損失
+            ce_loss_val = ""
+            gate_ent_val = ""
+            if model is not None:
+                raw_model = model.module if hasattr(model, 'module') else model
+                if hasattr(raw_model, '_last_ce_loss'):
+                    ce_loss_val = f"{raw_model._last_ce_loss:.6f}"
+                    logs["ce_loss"] = raw_model._last_ce_loss
+                if hasattr(raw_model, '_last_gate_entropy_loss'):
+                    gate_ent_val = f"{raw_model._last_gate_entropy_loss:.6f}"
+                    logs["gate_ent_loss"] = raw_model._last_gate_entropy_loss
+            
             with open(self.path, 'a', newline='') as f:
                 csv.writer(f).writerow([
                     state.global_step, 
                     logs.get("loss", ""), 
+                    ce_loss_val,
+                    gate_ent_val,
                     logs.get("eval_loss", ""), 
                     f"{g_loc_avg:.4f}", 
                     f"{g_mem_avg:.4f}", 
@@ -147,6 +168,78 @@ class QuantumCPTMonitor(TrainerCallback):
                     print(f"\n[Monitor] 🌟 收斂突破 ({old_best:.4f} -> {current_eval_loss:.4f})，儲存至 {best_model_path}")
             else:
                 print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})。")
+
+# ==========================================
+# [ HuggingFace 自動上傳器 ]
+# ==========================================
+class HFAutoUploadCallback(TrainerCallback):
+    """當 ce_loss 創新低且低於門檻值時，於背景執行緒自動上傳 Best Model 與 CSV。"""
+    def __init__(self, repo_id=REPO_ID, model_path=None, log_path=LOG_PATH,
+                 ce_loss_threshold=HF_CE_LOSS_THRESHOLD, save_dir=SAVE_DIR):
+        self.repo_id = repo_id
+        self.model_path = model_path or os.path.join(save_dir, "best_cpt_model.pth")
+        self.log_path = log_path
+        self.ce_loss_threshold = ce_loss_threshold
+        self.best_ce_loss = float('inf')
+        self._upload_lock = threading.Lock()   # 防止重疊上傳
+
+    def _do_upload(self, ce_loss_val, step):
+        """於背景執行緒執行實際上傳動作。"""
+        with self._upload_lock:
+            try:
+                api = HfApi()
+                api.create_repo(repo_id=self.repo_id, exist_ok=True, repo_type="model")
+
+                # 上傳 Best Model
+                if os.path.isfile(self.model_path):
+                    api.upload_file(
+                        path_or_fileobj=self.model_path,
+                        path_in_repo=os.path.basename(self.model_path),
+                        repo_id=self.repo_id,
+                        repo_type="model",
+                        commit_message=f"[Auto] step={step} ce_loss={ce_loss_val:.6f}"
+                    )
+                    print(f"\n[HF Upload] ✅ Best Model 上傳完成 (step={step}, ce_loss={ce_loss_val:.4f})")
+                else:
+                    print(f"\n[HF Upload] ⚠️ 找不到模型檔案 {self.model_path}，跳過模型上傳。")
+
+                # 上傳 CSV Log
+                if os.path.isfile(self.log_path):
+                    api.upload_file(
+                        path_or_fileobj=self.log_path,
+                        path_in_repo=os.path.basename(self.log_path),
+                        repo_id=self.repo_id,
+                        repo_type="model",
+                        commit_message=f"[Auto] log update step={step}"
+                    )
+                    print(f"[HF Upload] ✅ CSV Log 上傳完成")
+                else:
+                    print(f"[HF Upload] ⚠️ 找不到 CSV Log {self.log_path}，跳過 Log 上傳。")
+
+                print(f"[HF Upload] 🔗 https://huggingface.co/{self.repo_id}/tree/main")
+            except Exception as e:
+                print(f"\n[HF Upload] ❌ 上傳失敗: {e}")
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if metrics is None:
+            return
+
+        # eval_loss 現在是純 CE loss（eval 時不加 entropy 懲罰）
+        ce_loss = metrics.get("eval_loss", None)
+        if ce_loss is None:
+            return
+
+        # 觸發條件：ce_loss 創新低 且 低於門檻值
+        if ce_loss < self.best_ce_loss and ce_loss < self.ce_loss_threshold:
+            self.best_ce_loss = ce_loss
+            step = state.global_step
+            print(f"\n[HF Upload] 🚀 CE Loss 突破門檻 ({ce_loss:.4f} < {self.ce_loss_threshold})，啟動背景上傳...")
+            t = threading.Thread(
+                target=self._do_upload,
+                args=(ce_loss, step),
+                daemon=True
+            )
+            t.start()
 
 # ==========================================
 # [ 物理隔離 ] N -> N+B 絕對斷層拼接器
@@ -194,7 +287,7 @@ def main():
     print(f"✅ 資料映射與絕對隔離完成！訓練集: {len(train_ds):,} 筆 | 獨立驗證集: {len(eval_ds)} 筆")
 
     base = AGIV2G(vocab_size=262144, D=1152, C=CHUNK, hidden_dim=6912, num_blocks=26)
-    model = AGIV2GForCausalLMT(base, use_gc=True)
+    model = AGIV2GForCausalLMT(base, use_gc=True, gate_entropy_lambda=GATE_ENTROPY_LAMBDA)
     print("✅ 模型實例化完成，採用原生隨機初始化。")
     
     if os.path.exists(BEST_ROUTER_32K_PATH):
@@ -241,7 +334,8 @@ def main():
         data_collator=CPTDataCollator(pad_id),   
         callbacks=[
             QuantumCPTMonitor(path=LOG_PATH, save_dir=SAVE_DIR),
-            ThermalControlCallback(delay_seconds=2.3) # 🛡️ 植入 1.5 秒硬體保護控制器
+            ThermalControlCallback(delay_seconds=2.3), # 🛡️ 植入 1.5 秒硬體保護控制器
+            HFAutoUploadCallback()                     # 🌐 CE Loss 突破門檻自動上傳至 HuggingFace
         ]
     )
 

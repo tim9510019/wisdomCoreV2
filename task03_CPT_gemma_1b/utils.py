@@ -347,10 +347,11 @@ class AGIV2GForCausalLM(nn.Module):
         return {"loss": loss, "logits": logits} if logits is not None else {"loss": loss}
 
 class AGIV2GForCausalLMT(nn.Module):
-    def __init__(self, base_model, use_gc=True):
+    def __init__(self, base_model, use_gc=True, gate_entropy_lambda=0.01):
         super().__init__()
         self.base_model = base_model
         self.use_gc = use_gc
+        self.gate_entropy_lambda = gate_entropy_lambda
 
     def forward(self, input_ids, labels=None, **kwargs):
         n_split_index = kwargs.get("n_split_index", None)
@@ -396,7 +397,19 @@ class AGIV2GForCausalLMT(nn.Module):
                 
             loss = total_loss / max(valid_tokens, 1)
             
-            # 🌟 修改點: 已完全拔除 gate_anchor_loss 懲罰，將主導權還給 CE Loss
+            if self.training:
+                # 🌟 訓練時：加入閘門負熵正則化損失 (防止任何閘門完全歸零)
+                gate_neg_entropy = self.base_model.compute_gate_neg_entropy()
+                # neg_entropy 值域 [-log3, 0]，加上 log3 使其值域變為 [0, log3]
+                gate_entropy_loss = gate_neg_entropy + math.log(3.0)
+                
+                # 側通道儲存：供 callback 分開顯示訓練期間的分項數值
+                self._last_ce_loss = loss.detach().item()
+                self._last_gate_entropy_loss = gate_entropy_loss.detach().item()
+                
+                # 總 loss = CE loss + λ * 負熵懲罰
+                loss = loss + self.gate_entropy_lambda * gate_entropy_loss
+            # Eval 時：直接回傳純 CE loss，eval_loss 數值完全乾淨
             
         else:
             logits = self.base_model.fc_out(hidden_states)

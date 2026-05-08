@@ -167,9 +167,6 @@ class AGIV2GlobalBlock(nn.Module):
         g_mem = routing_weights[..., 1:2].to(dtype)
         g_fft = routing_weights[..., 2:3].to(dtype)
         
-        # 墊高地板 (防止幻覺斷流)
-        g_mem = torch.clamp(g_mem, min=0.2)
-        
         # 動態能量守恆校準 (防止特徵爆炸)
         gate_sum = g_loc + g_mem + g_fft 
         scale_factor = gate_sum.clamp(min=1.0)
@@ -181,6 +178,10 @@ class AGIV2GlobalBlock(nn.Module):
         self.avg_g_loc = g_loc.mean().detach()
         self.avg_g_mem = g_mem.mean().detach()
         self.avg_g_fft = g_fft.mean().detach()
+        # 保留帶梯度版本供負熵損失使用
+        self._g_loc_for_loss = g_loc.mean()
+        self._g_mem_for_loss = g_mem.mean()
+        self._g_fft_for_loss = g_fft.mean()
         
         if n_split_index is not None:
             seq_range = torch.arange(L, device=device).unsqueeze(0)
@@ -330,6 +331,30 @@ class AGIV2G(nn.Module):
         for block in self.blocks:
             if hasattr(block, 'temperature'):
                 block.temperature.fill_(temp)
+
+    def compute_gate_neg_entropy(self):
+        """計算所有 GlobalBlock 閘門的負熵損失，防止任何閘門完全歸零。
+        
+        負熵越大 (接近 0) 代表分布越集中 → 懲罰越大
+        負熵越小 (接近 -log3) 代表分布越均勻 → 懲罰越小
+        返回帶梯度的標量，可直接加入總 loss 反向傳播。
+        """
+        neg_entropy_sum = 0.0
+        count = 0
+        eps = 1e-8
+        for block in self.blocks:
+            if hasattr(block, '_g_loc_for_loss'):
+                # 使用帶梯度的閘門均值
+                p = torch.stack([block._g_loc_for_loss, block._g_mem_for_loss, block._g_fft_for_loss])
+                # 歸一化為機率分布
+                p = p / (p.sum() + eps)
+                # 負熵: sum(p * log(p))，值域 [-log3, 0]
+                neg_entropy_sum = neg_entropy_sum + (p * torch.log(p + eps)).sum()
+                count += 1
+        if count == 0:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        # 取平均，返回負熵 (越接近 0 懲罰越大)
+        return neg_entropy_sum / count
 
     def forward(self, x, n_split_index=None):
         out = self.embedding(x)
