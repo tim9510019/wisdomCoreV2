@@ -42,7 +42,7 @@ GATE_ENTROPY_LAMBDA = 0.01           # 閘門負熵正則化權重 λ
 
 # HuggingFace 自動上傳配置
 REPO_ID = "tim9510019/AGIV3-blackwell-CPT_GT"
-HF_CE_LOSS_THRESHOLD = 3.9          # 只有 eval_loss 低於此值才觸發上傳
+HF_CE_LOSS_THRESHOLD = 0.975          # 只有 eval_loss 低於此值才觸發上傳
 
 # ==========================================
 # [ 動態 Byte 轉換與絕對斷層拼接器 ]
