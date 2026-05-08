@@ -75,9 +75,9 @@ class QuantumCPTMonitor(TrainerCallback):
                     reader = csv.reader(f)
                     next(reader, None) 
                     for row in reader:
-                        if len(row) > 2 and row[2].strip(): 
+                        if len(row) > 4 and row[4].strip(): 
                             try:
-                                val = float(row[2])
+                                val = float(row[4])
                                 if val < self.best_eval_loss: self.best_eval_loss = val
                             except ValueError: pass
                 if self.best_eval_loss != float('inf'):
