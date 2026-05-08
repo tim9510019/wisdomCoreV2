@@ -399,22 +399,84 @@ class AGIV2GForCausalLMT(nn.Module):
             
             if self.training:
                 # 🌟 訓練時：加入閘門負熵正則化損失 (防止任何閘門完全歸零)
-                gate_neg_entropy = self.base_model.compute_gate_neg_entropy()
-                # neg_entropy 值域 [-log3, 0]，加上 log3 使其值域變為 [0, log3]
-                gate_entropy_loss = gate_neg_entropy + math.log(3.0)
-                
-                # 側通道儲存：供 callback 分開顯示訓練期間的分項數值
-                self._last_ce_loss = loss.detach().item()
-                self._last_gate_entropy_loss = gate_entropy_loss.detach().item()
-                
-                # 總 loss = CE loss + λ * 負熵懲罰
-                loss = loss + self.gate_entropy_lambda * gate_entropy_loss
+                if hasattr(self.base_model, 'compute_gate_neg_entropy'):
+                    gate_neg_entropy = self.base_model.compute_gate_neg_entropy()
+                    # neg_entropy 值域 [-log3, 0]，加上 log3 使其值域變為 [0, log3]
+                    gate_entropy_loss = gate_neg_entropy + math.log(3.0)
+                    
+                    # 側通道儲存：供 callback 分開顯示訓練期間的分項數值
+                    self._last_ce_loss = loss.detach().item()
+                    self._last_gate_entropy_loss = gate_entropy_loss.detach().item()
+                    
+                    # 總 loss = CE loss + λ * 負熵懲罰
+                    loss = loss + self.gate_entropy_lambda * gate_entropy_loss
+                else:
+                    if not getattr(self, '_warned_no_gate_entropy', False):
+                        print("⚠️ [AGIV2GForCausalLMT] base_model 缺少 compute_gate_neg_entropy()，"
+                              "閘門負熵損失已停用。")
+                        self._warned_no_gate_entropy = True
+                    self._last_ce_loss = loss.detach().item()
+                    self._last_gate_entropy_loss = 0.0
             # Eval 時：直接回傳純 CE loss，eval_loss 數值完全乾淨
             
         else:
             logits = self.base_model.fc_out(hidden_states)
             
         return {"loss": loss, "logits": logits} if logits is not None else {"loss": loss}
+
+# ==========================================
+# 3. AGIV3 訓練包裝器 (Byte Latent 漏斗架構)
+# ==========================================
+class AGIV3ForCausalLM(nn.Module):
+    def __init__(self, base_model, use_gc=True, gate_entropy_lambda=0.1):
+        super().__init__()
+        self.base_model = base_model
+        self.use_gc = use_gc
+        self.gate_entropy_lambda = gate_entropy_lambda
+
+    def forward(self, input_ids, labels=None, **kwargs):
+        n_split_index = kwargs.get("n_split_index", None)
+
+        # AGIV3 是漏斗架構，整個 forward 必須統一處理，不能逐塊拆散
+        if self.training and self.use_gc:
+            logits = checkpoint.checkpoint(
+                self.base_model, input_ids, use_reentrant=False, n_split_index=n_split_index
+            )
+        else:
+            logits = self.base_model(input_ids, n_split_index=n_split_index)
+
+        loss = None
+        if labels is not None:
+            # Shift 邏輯：Byte N 預測 Byte N+1
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)).float(), shift_labels.view(-1))
+
+            if self.training:
+                # 🌟 訓練時：加入閘門負熵正則化損失 (防止任何閘門完全歸零)
+                if hasattr(self.base_model, 'compute_gate_neg_entropy'):
+                    gate_neg_entropy = self.base_model.compute_gate_neg_entropy()
+                    # neg_entropy 值域 [-log3, 0]，加上 log3 使其值域變為 [0, log3]
+                    gate_entropy_loss = gate_neg_entropy + math.log(3.0)
+
+                    # 側通道儲存：供 callback 分開顯示訓練期間的分項數值
+                    self._last_ce_loss = loss.detach().item()
+                    self._last_gate_entropy_loss = gate_entropy_loss.detach().item()
+
+                    # 總 loss = CE loss + λ * 負熵懲罰
+                    loss = loss + self.gate_entropy_lambda * gate_entropy_loss
+                else:
+                    # ⚠️ base_model 缺少 compute_gate_neg_entropy，跳過閘門損失
+                    if not getattr(self, '_warned_no_gate_entropy', False):
+                        print("⚠️ [AGIV3ForCausalLM] base_model 缺少 compute_gate_neg_entropy()，"
+                              "閘門負熵損失已停用。請確認 AGIV3 版本是否正確。")
+                        self._warned_no_gate_entropy = True
+                    self._last_ce_loss = loss.detach().item()
+                    self._last_gate_entropy_loss = 0.0
+            # Eval 時：直接回傳純 CE loss，eval_loss 數值完全乾淨
+
+        return {"loss": loss, "logits": logits}
 
 # ==========================================
 # 2. 權重移植、凍結與動態監控 Callback
