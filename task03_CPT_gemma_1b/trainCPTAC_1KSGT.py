@@ -44,6 +44,8 @@ GRAD_ACCUMULATION_STEPS = 16
 LEARNING_RATE = 1e-4               
 CHUNK = 256
 GATE_ENTROPY_LAMBDA = 0.1          # 閘門負熵正則化權重 λ
+ROPE_LOCAL = 10000.0
+ROPE_GLOBAL = 10000.0
 
 # HuggingFace 自動上傳配置
 REPO_ID = "tim9510019/AGIV2-1300M-blackwell-CPT_GT"
@@ -286,7 +288,7 @@ def main():
     train_ds, eval_ds = dataset['train'], dataset['test']
     print(f"✅ 資料映射與絕對隔離完成！訓練集: {len(train_ds):,} 筆 | 獨立驗證集: {len(eval_ds)} 筆")
 
-    base = AGIV2G(vocab_size=262144, D=1152, C=CHUNK, hidden_dim=6912, num_blocks=26, rope_local=10000.0, rope_global=10000.0)
+    base = AGIV2G(vocab_size=262144, D=1152, C=CHUNK, hidden_dim=6912, num_blocks=26, rope_local=ROPE_LOCAL, rope_global=ROPE_GLOBAL)
     model = AGIV2GForCausalLMT(base, use_gc=True, gate_entropy_lambda=GATE_ENTROPY_LAMBDA)
     print("✅ 模型實例化完成，採用原生隨機初始化。")
     
