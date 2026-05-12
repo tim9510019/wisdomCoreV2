@@ -286,7 +286,7 @@ def main():
     train_ds, eval_ds = dataset['train'], dataset['test']
     print(f"✅ 資料映射與絕對隔離完成！訓練集: {len(train_ds):,} 筆 | 獨立驗證集: {len(eval_ds)} 筆")
 
-    base = AGIV2G(vocab_size=262144, D=1152, C=CHUNK, hidden_dim=6912, num_blocks=26)
+    base = AGIV2G(vocab_size=262144, D=1152, C=CHUNK, hidden_dim=6912, num_blocks=26, rope_local=10000.0, rope_global=10000.0)
     model = AGIV2GForCausalLMT(base, use_gc=True, gate_entropy_lambda=GATE_ENTROPY_LAMBDA)
     print("✅ 模型實例化完成，採用原生隨機初始化。")
     

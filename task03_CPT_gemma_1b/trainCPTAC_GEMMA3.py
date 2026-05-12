@@ -287,9 +287,9 @@ def main():
     print(f"✅ 資料映射與絕對隔離完成！訓練集: {len(train_ds):,} 筆 | 獨立驗證集: {len(eval_ds)} 筆")
 
     # ==========================================
-    # 🌟 核心替換：改用 GEMMA3，參數維持 CHUNK=256 
+    # 🌟 核心替換：改用 GEMMA3，參數維持 CHUNK=256，並傳入外部 RoPE 頻率
     # ==========================================
-    base = GEMMA3(vocab_size=262144, D=1152, C=CHUNK, hidden_dim=6912, num_blocks=26)
+    base = GEMMA3(vocab_size=262144, D=1152, C=CHUNK, hidden_dim=6912, num_blocks=26, rope_local=10000.0, rope_global=1000000.0)
     model = AGIV2GForCausalLMT(base, use_gc=True, gate_entropy_lambda=GATE_ENTROPY_LAMBDA)
     print("✅ GEMMA3 模型實例化完成，採用原生隨機初始化。")
     

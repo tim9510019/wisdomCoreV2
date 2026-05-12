@@ -34,10 +34,10 @@ class GemmaFFN(nn.Module):
         gate = F.gelu(self.gate_proj(x), approximate="tanh")
         return self.down_proj(gate * self.up_proj(x))
 
-def apply_rope(x, head_dim):
+def apply_rope(x, head_dim, base_freq=1000000.0):
     B, L, num_heads, D = x.shape
     position = torch.arange(L, device=x.device).unsqueeze(1).float()
-    div_term = torch.exp(torch.arange(0, head_dim, 2, device=x.device).float() * -(math.log(1000000.0) / head_dim))
+    div_term = torch.exp(torch.arange(0, head_dim, 2, device=x.device).float() * -(math.log(base_freq) / head_dim))
     freqs = position * div_term 
     emb = torch.cat((freqs, freqs), dim=-1).unsqueeze(0).unsqueeze(2) 
     sin_val = torch.sin(emb).to(x.dtype)
@@ -57,13 +57,14 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 # 核心網路區塊
 # ==========================================
 class AGIV2LocalBlock(nn.Module):
-    def __init__(self, D=1152, hidden_dim=6912, C=1024, num_heads=4, num_kv_heads=1, head_dim=256):
+    def __init__(self, D=1152, hidden_dim=6912, C=1024, num_heads=4, num_kv_heads=1, head_dim=256, rope_base=1000000.0):
         super().__init__()
         self.C = C
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.num_key_value_groups = num_heads // num_kv_heads
+        self.rope_base = rope_base
         
         self.input_layernorm = GemmaRMSNorm(D)
         self.post_attention_layernorm = GemmaRMSNorm(D)
@@ -92,8 +93,8 @@ class AGIV2LocalBlock(nn.Module):
         K = self.k_norm(K)
         
         # 確保記憶體連續性 (Contiguous) 以符合 FlashAttention 底層要求
-        Q = apply_rope(Q, self.head_dim).contiguous()
-        K = apply_rope(K, self.head_dim).contiguous()
+        Q = apply_rope(Q, self.head_dim, base_freq=self.rope_base).contiguous()
+        K = apply_rope(K, self.head_dim, base_freq=self.rope_base).contiguous()
         V = V.contiguous()
         
         # 🌟 OOM 免疫與極致加速：調用官方 FlashAttention，使用原生因果滑動窗口
@@ -114,7 +115,7 @@ class AGIV2LocalBlock(nn.Module):
         return Output
 
 class AGIV2GlobalBlock(nn.Module):
-    def __init__(self, D=1152, hidden_dim=6912, K=1024, M=1024, C=1024, num_heads=4, num_kv_heads=1, head_dim=256):
+    def __init__(self, D=1152, hidden_dim=6912, K=1024, M=1024, C=1024, num_heads=4, num_kv_heads=1, head_dim=256, rope_base=1000000.0):
         super().__init__()
         self.D = D
         self.C = C
@@ -123,6 +124,7 @@ class AGIV2GlobalBlock(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.num_key_value_groups = num_heads // num_kv_heads
+        self.rope_base = rope_base
         
         self.input_layernorm = GemmaRMSNorm(D)
         self.post_attention_layernorm = GemmaRMSNorm(D)
@@ -266,8 +268,8 @@ class AGIV2GlobalBlock(nn.Module):
         Q_loc = self.q_norm(Q_loc)
         K_loc = self.k_norm(K_loc)
         
-        Q_loc = apply_rope(Q_loc, self.head_dim).contiguous()
-        K_loc = apply_rope(K_loc, self.head_dim).contiguous()
+        Q_loc = apply_rope(Q_loc, self.head_dim, base_freq=self.rope_base).contiguous()
+        K_loc = apply_rope(K_loc, self.head_dim, base_freq=self.rope_base).contiguous()
         V_loc = V_loc.contiguous()
         
         # 🌟 使用 FlashAttention 處理 L x L 的局部視角
@@ -312,7 +314,7 @@ class AGIV2GlobalBlock(nn.Module):
         return Output
 
 class AGIV2G(nn.Module):
-    def __init__(self, vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26, C=1024, K=1024, M=1024, num_heads=4, num_kv_heads=1, head_dim=256):
+    def __init__(self, vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26, C=1024, K=1024, M=1024, num_heads=4, num_kv_heads=1, head_dim=256, rope_local=10000.0, rope_global=1000000.0):
         super().__init__()
         self.D = D
         self.embedding = nn.Embedding(vocab_size, D)
@@ -320,9 +322,9 @@ class AGIV2G(nn.Module):
         
         for i in range(num_blocks):
             if (i + 1) % 6 == 0:
-                self.blocks.append(AGIV2GlobalBlock(D=D, hidden_dim=hidden_dim, K=K, M=M, C=C, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim))
+                self.blocks.append(AGIV2GlobalBlock(D=D, hidden_dim=hidden_dim, K=K, M=M, C=C, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim, rope_base=rope_global))
             else:
-                self.blocks.append(AGIV2LocalBlock(D=D, hidden_dim=hidden_dim, C=C, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim))
+                self.blocks.append(AGIV2LocalBlock(D=D, hidden_dim=hidden_dim, C=C, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim, rope_base=rope_local))
                 
         self.final_norm = GemmaRMSNorm(D)
         self.fc_out = nn.Linear(D, vocab_size, bias=False)

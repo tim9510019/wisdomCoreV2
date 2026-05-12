@@ -57,7 +57,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 # 核心網路區塊: 原始 GEMMA 3 架構
 # ==========================================
 class Gemma3DecoderLayer(nn.Module):
-    def __init__(self, D=1152, hidden_dim=6912, C=1024, num_heads=4, num_kv_heads=1, head_dim=256, is_global=False):
+    def __init__(self, D=1152, hidden_dim=6912, C=1024, num_heads=4, num_kv_heads=1, head_dim=256, is_global=False, rope_base=1000000.0):
         super().__init__()
         self.C = C
         self.num_heads = num_heads
@@ -65,6 +65,7 @@ class Gemma3DecoderLayer(nn.Module):
         self.head_dim = head_dim
         self.num_key_value_groups = num_heads // num_kv_heads
         self.is_global = is_global
+        self.rope_base = rope_base
         
         self.input_layernorm = GemmaRMSNorm(D)
         self.post_attention_layernorm = GemmaRMSNorm(D)
@@ -92,11 +93,8 @@ class Gemma3DecoderLayer(nn.Module):
         Q = self.q_norm(Q)
         K = self.k_norm(K)
         
-        # 根據歷史對話紀錄: RoPE base frequency 設定為 1K (Local) 與 32K (Global)
-        base_freq = 32000.0 if self.is_global else 1000.0
-        
-        Q = apply_rope(Q, self.head_dim, base_freq=base_freq).contiguous()
-        K = apply_rope(K, self.head_dim, base_freq=base_freq).contiguous()
+        Q = apply_rope(Q, self.head_dim, base_freq=self.rope_base).contiguous()
+        K = apply_rope(K, self.head_dim, base_freq=self.rope_base).contiguous()
         V = V.contiguous()
         
         # 根據是否為 Global Attention 設定 Window Size
@@ -118,7 +116,7 @@ class Gemma3DecoderLayer(nn.Module):
         return Output
 
 class GEMMA3(nn.Module):
-    def __init__(self, vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26, C=1024, num_heads=4, num_kv_heads=1, head_dim=256):
+    def __init__(self, vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26, C=1024, num_heads=4, num_kv_heads=1, head_dim=256, rope_local=10000.0, rope_global=1000000.0):
         super().__init__()
         self.D = D
         self.embedding = nn.Embedding(vocab_size, D)
@@ -127,6 +125,7 @@ class GEMMA3(nn.Module):
         for i in range(num_blocks):
             # 每 6 層設定為 Global Block，其餘為 Local Sliding Window
             is_global = ((i + 1) % 6 == 0)
+            rb = rope_global if is_global else rope_local
             self.blocks.append(Gemma3DecoderLayer(
                 D=D, 
                 hidden_dim=hidden_dim, 
@@ -134,7 +133,8 @@ class GEMMA3(nn.Module):
                 num_heads=num_heads, 
                 num_kv_heads=num_kv_heads, 
                 head_dim=head_dim,
-                is_global=is_global
+                is_global=is_global,
+                rope_base=rb
             ))
                 
         self.final_norm = GemmaRMSNorm(D)
