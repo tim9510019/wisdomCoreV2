@@ -152,13 +152,13 @@ class Gemma3DecoderLayer(nn.Module):
         return Output
 
 class AGIGEMMA3(nn.Module):
-    def __init__(self, vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26, N_fft=1, C=1024, K=1024, num_heads=4, num_kv_heads=1, head_dim=256, rope_local=10000.0, rope_global=1000000.0):
+    def __init__(self, vocab_size=262144, D=1152, hidden_dim=6912, num_blocks=26, N_fft_F=1, N_fft_B=1, C=1024, K=1024, num_heads=4, num_kv_heads=1, head_dim=256, rope_local=10000.0, rope_global=1000000.0):
         super().__init__()
         self.D = D
         self.embedding = nn.Embedding(vocab_size, D)
         
         # 前 N 層 FFT
-        self.pre_fft_blocks = nn.ModuleList([PureFFTBlock(D=D, K=K) for _ in range(N_fft)])
+        self.pre_fft_blocks = nn.ModuleList([PureFFTBlock(D=D, K=K) for _ in range(N_fft_F)])
         
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
@@ -177,7 +177,7 @@ class AGIGEMMA3(nn.Module):
             ))
             
         # 後 N 層 FFT
-        self.post_fft_blocks = nn.ModuleList([PureFFTBlock(D=D, K=K) for _ in range(N_fft)])
+        self.post_fft_blocks = nn.ModuleList([PureFFTBlock(D=D, K=K) for _ in range(N_fft_B)])
                 
         self.final_norm = GemmaRMSNorm(D)
         self.fc_out = nn.Linear(D, vocab_size, bias=False)

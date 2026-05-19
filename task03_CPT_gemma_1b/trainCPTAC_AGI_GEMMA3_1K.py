@@ -335,8 +335,8 @@ def main():
         C=CHUNK, 
         hidden_dim=6912, 
         num_blocks=26, 
-        N_fft_F=N_FFT_F,
-        N_fft_B=N_FFT_B,
+        N_FFT_F = N_FFT_F,
+        N_FFT_B = N_FFT_B,
         rope_local=ROPE_LOCAL, 
         rope_global=ROPE_GLOBAL
     )
