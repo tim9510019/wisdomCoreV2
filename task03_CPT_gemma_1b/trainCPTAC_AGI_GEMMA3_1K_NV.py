@@ -51,14 +51,14 @@ SAVE_TOTAL_LIMIT = 2
 LOGGING_STEPS = 1                  
 BATCH_SIZE_PER_DEVICE = 2          
 GRAD_ACCUMULATION_STEPS = 16       
-LEARNING_RATE = 1e-4               
+LEARNING_RATE = 1e-5               
 CHUNK = 256
 ROPE_LOCAL = 10000.0
 ROPE_GLOBAL = 1000000.0
 
 # HuggingFace 自動上傳配置
 REPO_ID = "tim9510019/AGIGEMMA3-1B-CPT_1K_NV"
-HF_CE_LOSS_THRESHOLD = 3.9          
+HF_CE_LOSS_THRESHOLD = 2.65          
 
 # ==========================================
 # [ 硬體保護：主動式散熱控制器 ]
@@ -310,7 +310,7 @@ class AGIGEMMA3ForCausalLM(nn.Module):
 # [ 核心引擎 ]
 # ==========================================
 def main():
-    print(f"\n🚀 啟動 AGIGEMMA3 CPT 訓練矩陣 (前 {N_FFT} 後 {N_FFT} 層純 FFT 架構 + 原生權重起步)...")
+    print(f"\n🚀 啟動 AGIGEMMA3 CPT 訓練矩陣 (前 {N_FFT_F} 後 {N_FFT_B} 層純 FFT 架構 + 原生權重起步)...")
     
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
