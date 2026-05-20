@@ -38,11 +38,12 @@ LOGGING_STEPS = 1
 BATCH_SIZE_PER_DEVICE = 2
 GRAD_ACCUMULATION_STEPS = 16
 LEARNING_RATE = 1e-4
-GATE_ENTROPY_LAMBDA = 0.01           # 閘門負熵正則化權重 λ
+GATE_ENTROPY_LAMBDA = 0.01  # 閘門負熵正則化權重 λ
 
 # HuggingFace 自動上傳配置
 REPO_ID = "tim9510019/AGIV3-blackwell-CPT_GT"
-HF_CE_LOSS_THRESHOLD = 0.975          # 只有 eval_loss 低於此值才觸發上傳
+HF_CE_LOSS_THRESHOLD = 0.975  # 只有 eval_loss 低於此值才觸發上傳
+
 
 # ==========================================
 # [ 動態 Byte 轉換與絕對斷層拼接器 ]
@@ -55,8 +56,8 @@ class PureByteDataCollator:
         batch_input_ids, batch_labels, batch_n_splits = [], [], []
 
         for f in features:
-            bytes_past = list(f["text_past"].encode('utf-8'))
-            bytes_future = list(f["text_future"].encode('utf-8'))
+            bytes_past = list(f["text_past"].encode("utf-8"))
+            bytes_future = list(f["text_future"].encode("utf-8"))
             seq = bytes_past + bytes_future
             n_split = len(bytes_past)
             labels = [-100] * n_split + bytes_future
@@ -74,8 +75,9 @@ class PureByteDataCollator:
         return {
             "input_ids": torch.tensor(padded_inputs, dtype=torch.long),
             "labels": torch.tensor(padded_labels, dtype=torch.long),
-            "n_split_index": torch.tensor(batch_n_splits, dtype=torch.long)
+            "n_split_index": torch.tensor(batch_n_splits, dtype=torch.long),
         }
+
 
 # ==========================================
 # [ 硬體保護：主動式散熱控制器 ]
@@ -87,6 +89,7 @@ class ThermalControlCallback(TrainerCallback):
     def on_step_end(self, args, state, control, **kwargs):
         time.sleep(self.delay_seconds)
 
+
 # ==========================================
 # [ 量子退火監控器 (動態閘門觀測版) ]
 # ==========================================
@@ -94,52 +97,76 @@ class QuantumCPTMonitor(TrainerCallback):
     def __init__(self, path=LOG_PATH, save_dir=SAVE_DIR):
         self.path = path
         self.save_dir = save_dir
-        self.best_eval_loss = float('inf')
+        self.best_eval_loss = float("inf")
         os.makedirs(self.save_dir, exist_ok=True)
 
         if os.path.exists(self.path):
             try:
-                with open(self.path, 'r', encoding='utf-8') as f:
+                with open(self.path, "r", encoding="utf-8") as f:
                     reader = csv.reader(f)
                     next(reader, None)
                     for row in reader:
                         if len(row) > 4 and row[4].strip():
                             try:
                                 val = float(row[4])
-                                if val < self.best_eval_loss: self.best_eval_loss = val
-                            except ValueError: pass
-                if self.best_eval_loss != float('inf'):
-                    print(f"\n📈 [Monitor] 當前最佳 Eval Loss 基準: {self.best_eval_loss:.4f}")
+                                if val < self.best_eval_loss:
+                                    self.best_eval_loss = val
+                            except ValueError:
+                                pass
+                if self.best_eval_loss != float("inf"):
+                    print(
+                        f"\n📈 [Monitor] 當前最佳 Eval Loss 基準: {self.best_eval_loss:.4f}"
+                    )
             except Exception as e:
                 print(f"\n⚠️ [Monitor] 讀取歷史紀錄失敗: {e}")
         else:
-            with open(self.path, 'w', newline='') as f:
-                csv.writer(f).writerow(['step', 'loss', 'ce_loss', 'gate_ent_loss', 'eval_loss', 'g_loc', 'g_mem', 'g_fft', 'time'])
+            with open(self.path, "w", newline="") as f:
+                csv.writer(f).writerow(
+                    [
+                        "step",
+                        "loss",
+                        "ce_loss",
+                        "gate_ent_loss",
+                        "eval_loss",
+                        "g_loc",
+                        "g_mem",
+                        "g_fft",
+                        "time",
+                    ]
+                )
 
     def on_step_begin(self, args, state, control, **kwargs):
-        model = kwargs.get('model', None)
+        model = kwargs.get("model", None)
         if model is not None:
             # 溫度從 2.0 線性降至 0.5
             progress = state.global_step / max(1, state.max_steps)
             current_temp = max(0.5, 2.0 - 1.5 * progress)
-            raw_model = model.module if hasattr(model, 'module') else model
-            core_model = raw_model.base_model if hasattr(raw_model, 'base_model') else raw_model
-            if hasattr(core_model, 'set_temperature'):
+            raw_model = model.module if hasattr(model, "module") else model
+            core_model = (
+                raw_model.base_model if hasattr(raw_model, "base_model") else raw_model
+            )
+            if hasattr(core_model, "set_temperature"):
                 core_model.set_temperature(current_temp)
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if logs:
-            model = kwargs.get('model', None)
+            model = kwargs.get("model", None)
             g_loc_avg, g_mem_avg, g_fft_avg = 0.0, 0.0, 0.0
             blocks_count = 0
 
             # 🌟 攔截並計算所有 GlobalBlock 的閘門平均值
             if model is not None:
-                raw_model = model.module if hasattr(model, 'module') else model
-                core_model = raw_model.base_model if hasattr(raw_model, 'base_model') else raw_model
-                block_list = getattr(core_model, 'main_blocks', getattr(core_model, 'blocks', []))
+                raw_model = model.module if hasattr(model, "module") else model
+                core_model = (
+                    raw_model.base_model
+                    if hasattr(raw_model, "base_model")
+                    else raw_model
+                )
+                block_list = getattr(
+                    core_model, "main_blocks", getattr(core_model, "blocks", [])
+                )
                 for b in block_list:
-                    if hasattr(b, 'avg_g_loc'):
+                    if hasattr(b, "avg_g_loc"):
                         g_loc_avg += b.avg_g_loc.item()
                         g_mem_avg += b.avg_g_mem.item()
                         g_fft_avg += b.avg_g_fft.item()
@@ -158,26 +185,28 @@ class QuantumCPTMonitor(TrainerCallback):
             ce_loss_val = ""
             gate_ent_val = ""
             if model is not None:
-                raw_model = model.module if hasattr(model, 'module') else model
-                if hasattr(raw_model, '_last_ce_loss'):
+                raw_model = model.module if hasattr(model, "module") else model
+                if hasattr(raw_model, "_last_ce_loss"):
                     ce_loss_val = f"{raw_model._last_ce_loss:.6f}"
                     logs["ce_loss"] = raw_model._last_ce_loss
-                if hasattr(raw_model, '_last_gate_entropy_loss'):
+                if hasattr(raw_model, "_last_gate_entropy_loss"):
                     gate_ent_val = f"{raw_model._last_gate_entropy_loss:.6f}"
                     logs["gate_ent_loss"] = raw_model._last_gate_entropy_loss
 
-            with open(self.path, 'a', newline='') as f:
-                csv.writer(f).writerow([
-                    state.global_step,
-                    logs.get("loss", ""),
-                    ce_loss_val,
-                    gate_ent_val,
-                    logs.get("eval_loss", ""),
-                    f"{g_loc_avg:.4f}",
-                    f"{g_mem_avg:.4f}",
-                    f"{g_fft_avg:.4f}",
-                    time.ctime()
-                ])
+            with open(self.path, "a", newline="") as f:
+                csv.writer(f).writerow(
+                    [
+                        state.global_step,
+                        logs.get("loss", ""),
+                        ce_loss_val,
+                        gate_ent_val,
+                        logs.get("eval_loss", ""),
+                        f"{g_loc_avg:.4f}",
+                        f"{g_mem_avg:.4f}",
+                        f"{g_fft_avg:.4f}",
+                        time.ctime(),
+                    ]
+                )
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         if metrics and "eval_loss" in metrics:
@@ -185,28 +214,40 @@ class QuantumCPTMonitor(TrainerCallback):
             if current_eval_loss < self.best_eval_loss:
                 old_best = self.best_eval_loss
                 self.best_eval_loss = current_eval_loss
-                model = kwargs.get('model', None)
+                model = kwargs.get("model", None)
                 if model is not None:
                     best_model_path = os.path.join(self.save_dir, "best_cpt_model.pth")
-                    raw_model = model.module if hasattr(model, 'module') else model
+                    raw_model = model.module if hasattr(model, "module") else model
                     torch.save(raw_model.state_dict(), best_model_path)
-                    print(f"\n[Monitor] 🌟 收斂突破 ({old_best:.4f} -> {current_eval_loss:.4f})，儲存至 {best_model_path}")
+                    print(
+                        f"\n[Monitor] 🌟 收斂突破 ({old_best:.4f} -> {current_eval_loss:.4f})，儲存至 {best_model_path}"
+                    )
             else:
-                print(f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})。")
+                print(
+                    f"\n[Monitor] 🛡️ 此次成績 ({current_eval_loss:.4f}) 未超越歷史最佳 ({self.best_eval_loss:.4f})。"
+                )
+
 
 # ==========================================
 # [ HuggingFace 自動上傳器 ]
 # ==========================================
 class HFAutoUploadCallback(TrainerCallback):
     """當 eval_loss 創新低且低於門檻值時，於背景執行緒自動上傳 Best Model 與 CSV。"""
-    def __init__(self, repo_id=REPO_ID, model_path=None, log_path=LOG_PATH,
-                 ce_loss_threshold=HF_CE_LOSS_THRESHOLD, save_dir=SAVE_DIR):
+
+    def __init__(
+        self,
+        repo_id=REPO_ID,
+        model_path=None,
+        log_path=LOG_PATH,
+        ce_loss_threshold=HF_CE_LOSS_THRESHOLD,
+        save_dir=SAVE_DIR,
+    ):
         self.repo_id = repo_id
         self.model_path = model_path or os.path.join(save_dir, "best_cpt_model.pth")
         self.log_path = log_path
         self.ce_loss_threshold = ce_loss_threshold
-        self.best_ce_loss = float('inf')
-        self._upload_lock = threading.Lock()   # 防止重疊上傳
+        self.best_ce_loss = float("inf")
+        self._upload_lock = threading.Lock()  # 防止重疊上傳
 
     def _do_upload(self, ce_loss_val, step):
         """於背景執行緒執行實際上傳動作。"""
@@ -222,11 +263,15 @@ class HFAutoUploadCallback(TrainerCallback):
                         path_in_repo=os.path.basename(self.model_path),
                         repo_id=self.repo_id,
                         repo_type="model",
-                        commit_message=f"[Auto] step={step} eval_loss={ce_loss_val:.6f}"
+                        commit_message=f"[Auto] step={step} eval_loss={ce_loss_val:.6f}",
                     )
-                    print(f"\n[HF Upload] ✅ Best Model 上傳完成 (step={step}, eval_loss={ce_loss_val:.4f})")
+                    print(
+                        f"\n[HF Upload] ✅ Best Model 上傳完成 (step={step}, eval_loss={ce_loss_val:.4f})"
+                    )
                 else:
-                    print(f"\n[HF Upload] ⚠️ 找不到模型檔案 {self.model_path}，跳過模型上傳。")
+                    print(
+                        f"\n[HF Upload] ⚠️ 找不到模型檔案 {self.model_path}，跳過模型上傳。"
+                    )
 
                 # 上傳 CSV Log
                 if os.path.isfile(self.log_path):
@@ -235,11 +280,13 @@ class HFAutoUploadCallback(TrainerCallback):
                         path_in_repo=os.path.basename(self.log_path),
                         repo_id=self.repo_id,
                         repo_type="model",
-                        commit_message=f"[Auto] log update step={step}"
+                        commit_message=f"[Auto] log update step={step}",
                     )
                     print(f"[HF Upload] ✅ CSV Log 上傳完成")
                 else:
-                    print(f"[HF Upload] ⚠️ 找不到 CSV Log {self.log_path}，跳過 Log 上傳。")
+                    print(
+                        f"[HF Upload] ⚠️ 找不到 CSV Log {self.log_path}，跳過 Log 上傳。"
+                    )
 
                 print(f"[HF Upload] 🔗 https://huggingface.co/{self.repo_id}/tree/main")
             except Exception as e:
@@ -258,13 +305,14 @@ class HFAutoUploadCallback(TrainerCallback):
         if ce_loss < self.best_ce_loss and ce_loss < self.ce_loss_threshold:
             self.best_ce_loss = ce_loss
             step = state.global_step
-            print(f"\n[HF Upload] 🚀 Eval Loss 突破門檻 ({ce_loss:.4f} < {self.ce_loss_threshold})，啟動背景上傳...")
+            print(
+                f"\n[HF Upload] 🚀 Eval Loss 突破門檻 ({ce_loss:.4f} < {self.ce_loss_threshold})，啟動背景上傳..."
+            )
             t = threading.Thread(
-                target=self._do_upload,
-                args=(ce_loss, step),
-                daemon=True
+                target=self._do_upload, args=(ce_loss, step), daemon=True
             )
             t.start()
+
 
 # ==========================================
 # [ 核心引擎 ]
@@ -276,9 +324,11 @@ def main():
     print(f"📦 讀取純文字拓撲: {parquet_file}")
     dataset_dict = load_dataset("parquet", data_files=parquet_file)
 
-    dataset = dataset_dict['train'].train_test_split(test_size=50, seed=RANDOM_SEED)
-    train_ds, eval_ds = dataset['train'], dataset['test']
-    print(f"✅ 資料映射完成！訓練集: {len(train_ds):,} 筆 | 獨立驗證集: {len(eval_ds)} 筆")
+    dataset = dataset_dict["train"].train_test_split(test_size=50, seed=RANDOM_SEED)
+    train_ds, eval_ds = dataset["train"], dataset["test"]
+    print(
+        f"✅ 資料映射完成！訓練集: {len(train_ds):,} 筆 | 獨立驗證集: {len(eval_ds)} 筆"
+    )
 
     base = AGIV3()
     model = AGIV3ForCausalLM(base, use_gc=True, gate_entropy_lambda=GATE_ENTROPY_LAMBDA)
@@ -309,7 +359,7 @@ def main():
         save_total_limit=SAVE_TOTAL_LIMIT,
         optim="paged_adamw_8bit",
         remove_unused_columns=False,
-        report_to="none"
+        report_to="none",
     )
 
     trainer = Trainer(
@@ -320,17 +370,22 @@ def main():
         data_collator=PureByteDataCollator(pad_byte=0),
         callbacks=[
             QuantumCPTMonitor(path=LOG_PATH, save_dir=SAVE_DIR),
-            ThermalControlCallback(delay_seconds=0.5),     # 🛡️ 硬體保護控制器
-            HFAutoUploadCallback()                         # 🌐 Eval Loss 突破門檻自動上傳至 HuggingFace
-        ]
+            ThermalControlCallback(delay_seconds=0.5),  # 🛡️ 硬體保護控制器
+            HFAutoUploadCallback(),  # 🌐 Eval Loss 突破門檻自動上傳至 HuggingFace
+        ],
     )
 
     last_checkpoint = get_last_checkpoint(SAVE_DIR)
     trainer.train(resume_from_checkpoint=last_checkpoint)
     torch.save(
-        model.state_dict() if not hasattr(model, 'module') else model.module.state_dict(),
-        os.path.join(SAVE_DIR, "final_agiv3_cpt_1k.pth")
+        (
+            model.state_dict()
+            if not hasattr(model, "module")
+            else model.module.state_dict()
+        ),
+        os.path.join(SAVE_DIR, "final_agiv3_cpt_1k.pth"),
     )
+
 
 if __name__ == "__main__":
     main()

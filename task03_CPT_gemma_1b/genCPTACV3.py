@@ -10,6 +10,7 @@ genCPTACV3.py — AGIV3 CPT 階段解碼 (Byte Latent 漏斗架構觀察版)
 4. 動態路由觀測：從 main_blocks 中的 AGIV2GlobalBlock 擷取即時閘門配額。
 5. 負載控制：MAX_PROMPT_BYTES 限制最大輸入長度，避免表徵崩潰。
 """
+
 import os
 import sys
 import torch
@@ -27,24 +28,25 @@ from utils import AGIV3ForCausalLM
 # ==========================================
 # --- 1. 路徑與基礎設定 ---
 CHECKPOINT_PATH = "./agiv3_cpt_checkpoints_1KSGT/best_cpt_model.pth"
-DATASET_PATH    = "./agiv2_stage1_1K/agiv3_raw_text.parquet"
-RANDOM_SEED     = 2026
-DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
-TEST_SIZE       = 50         # 驗證集切割大小
+DATASET_PATH = "./agiv2_stage1_1K/agiv3_raw_text.parquet"
+RANDOM_SEED = 2026
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TEST_SIZE = 50  # 驗證集切割大小
 
 # --- 2. 推論解碼參數 ---
-TEST_SAMPLE_INDEX  = 0      # 🎯 指定要測試的驗證集樣本 (範圍: 0 ~ TEST_SIZE-1)
-MAX_DISPLAY_BYTES  = 256    # 最大生成 Byte 數量
-TEMPERATURE        = 0.8    # 生成溫度
-REPETITION_PENALTY = 1.2    # 重複懲罰係數
-MAX_PROMPT_BYTES   = 1024   # 限制模型最大輸入長度 (bytes)
+TEST_SAMPLE_INDEX = 0  # 🎯 指定要測試的驗證集樣本 (範圍: 0 ~ TEST_SIZE-1)
+MAX_DISPLAY_BYTES = 256  # 最大生成 Byte 數量
+TEMPERATURE = 0.8  # 生成溫度
+REPETITION_PENALTY = 1.2  # 重複懲罰係數
+MAX_PROMPT_BYTES = 1024  # 限制模型最大輸入長度 (bytes)
 
 # --- 3. AGIV3 模型物理架構參數 (需與訓練時一致) ---
-USE_GC = False               # 推論時關閉 Gradient Checkpointing
+USE_GC = False  # 推論時關閉 Gradient Checkpointing
 
 # ==========================================
 # [ 核心函式區 ]
 # ==========================================
+
 
 def load_v3_model():
     print("🧬 [載入] 正在初始化 AGIV3 Byte Latent 漏斗架構...")
@@ -67,7 +69,9 @@ def load_v3_model():
 
 
 @torch.no_grad()
-def generate_v3_autoregressive(model, prompt_bytes, max_display, temperature, repetition_penalty):
+def generate_v3_autoregressive(
+    model, prompt_bytes, max_display, temperature, repetition_penalty
+):
     """
     純 Byte AR 解碼：M_global 鎖死於 N (bytes_past)，逐 Byte 自迴歸生成。
     """
@@ -77,7 +81,9 @@ def generate_v3_autoregressive(model, prompt_bytes, max_display, temperature, re
 
     print(f"\n🚀 [Byte AR 解碼] 啟動 (初始長度 N={n_split} bytes)")
     print(f"✨ [狀態] FFT/Memory GlobalBlock 已鎖定於前 {n_split} bytes")
-    print(f"✨ [參數] Temperature={temperature}, Repetition_Penalty={repetition_penalty}")
+    print(
+        f"✨ [參數] Temperature={temperature}, Repetition_Penalty={repetition_penalty}"
+    )
     print(f"✨ [狀態] Byte AR 生成引擎啟動...\n")
 
     generated_bytes = []
@@ -91,17 +97,23 @@ def generate_v3_autoregressive(model, prompt_bytes, max_display, temperature, re
             print("🔍 [分析] 🧠 AGIV3 GlobalBlock 動態路由分配 (Byte 態納許均衡):")
             core = model.base_model
             for i, block in enumerate(core.main_blocks):
-                if hasattr(block, 'avg_g_loc'):
+                if hasattr(block, "avg_g_loc"):
                     loc = block.avg_g_loc.item()
                     mem = block.avg_g_mem.item()
                     fft = block.avg_g_fft.item()
-                    dom = "Loc" if loc > mem and loc > fft else ("Mem" if mem > fft else "FFT")
-                    print(f"  ▶ MainBlock {i:02d} | Loc: {loc:.4f} | Mem: {mem:.4f} | FFT: {fft:.4f}  [主導: {dom}]")
+                    dom = (
+                        "Loc"
+                        if loc > mem and loc > fft
+                        else ("Mem" if mem > fft else "FFT")
+                    )
+                    print(
+                        f"  ▶ MainBlock {i:02d} | Loc: {loc:.4f} | Mem: {mem:.4f} | FFT: {fft:.4f}  [主導: {dom}]"
+                    )
             print("-" * 60)
 
         # 取得 logits
         if isinstance(outputs, dict):
-            logits = outputs['logits']
+            logits = outputs["logits"]
         else:
             logits = outputs
 
@@ -140,7 +152,7 @@ def generate_v3_autoregressive(model, prompt_bytes, max_display, temperature, re
     avg_conf = avg_conf / max(1, len(generated_bytes))
 
     # 安全解碼：bytes → UTF-8（容忍非法序列）
-    output_text = bytes(generated_bytes).decode('utf-8', errors='replace')
+    output_text = bytes(generated_bytes).decode("utf-8", errors="replace")
 
     print(f"📊 預測平均信心度: {avg_conf:.4f}")
     print(f"✅ 模型 Byte Latent 輸出：\n{output_text}")
@@ -155,14 +167,18 @@ def get_eval_sample(sample_index):
         sys.exit(1)
 
     dataset_dict = load_dataset("parquet", data_files=DATASET_PATH)
-    dataset = dataset_dict['train'].train_test_split(test_size=TEST_SIZE, seed=RANDOM_SEED)
-    eval_ds = dataset['test']
+    dataset = dataset_dict["train"].train_test_split(
+        test_size=TEST_SIZE, seed=RANDOM_SEED
+    )
+    eval_ds = dataset["test"]
 
     if sample_index < 0 or sample_index >= len(eval_ds):
         print(f"⚠️ 警告: 指定的樣本 ({sample_index}) 超出範圍，重置為 0。")
         sample_index = 0
 
-    print(f"📦 [資料集] 成功提取獨立驗證集 第 {sample_index} 筆樣本 (總數: {len(eval_ds)})")
+    print(
+        f"📦 [資料集] 成功提取獨立驗證集 第 {sample_index} 筆樣本 (總數: {len(eval_ds)})"
+    )
     return eval_ds[sample_index]
 
 
@@ -170,25 +186,33 @@ if __name__ == "__main__":
     sample = get_eval_sample(TEST_SAMPLE_INDEX)
 
     # V3 資料格式：text_past / text_future (raw string)
-    text_past   = sample["text_past"]
+    text_past = sample["text_past"]
     text_future = sample["text_future"]
 
-    bytes_past   = list(text_past.encode('utf-8'))
-    bytes_future = list(text_future.encode('utf-8'))
+    bytes_past = list(text_past.encode("utf-8"))
+    bytes_future = list(text_future.encode("utf-8"))
 
     # 負載截斷保護（從尾端保留，保留最近的上下文）
     if len(bytes_past) > MAX_PROMPT_BYTES:
-        print(f"✂️ [注意] 原始 Past ({len(bytes_past)} bytes) 超載，"
-              f"自動截斷保留後 {MAX_PROMPT_BYTES} bytes。")
+        print(
+            f"✂️ [注意] 原始 Past ({len(bytes_past)} bytes) 超載，"
+            f"自動截斷保留後 {MAX_PROMPT_BYTES} bytes。"
+        )
         bytes_past = bytes_past[-MAX_PROMPT_BYTES:]
 
     # 顯示上下文
     print(f"\n📥 [輸入上下文 text_past] (長度: {len(bytes_past)} bytes)：")
-    print(text_past[-MAX_PROMPT_BYTES:] if len(text_past.encode()) > MAX_PROMPT_BYTES else text_past)
+    print(
+        text_past[-MAX_PROMPT_BYTES:]
+        if len(text_past.encode()) > MAX_PROMPT_BYTES
+        else text_past
+    )
     print("-" * 60)
 
     # 顯示標準答案
-    true_future_text = bytes(bytes_future[:MAX_DISPLAY_BYTES]).decode('utf-8', errors='replace')
+    true_future_text = bytes(bytes_future[:MAX_DISPLAY_BYTES]).decode(
+        "utf-8", errors="replace"
+    )
     print(f"💡 [標準答案 text_future] (前 {MAX_DISPLAY_BYTES} bytes)：")
     print(true_future_text)
     print("-" * 60)
