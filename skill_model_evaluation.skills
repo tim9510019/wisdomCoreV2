@@ -1,0 +1,122 @@
+# SKILL: Model Base Capability Evaluation Pipeline (Multi-Dimensional Benchmarking)
+
+This document defines the standardized execution protocol and mathematical principles for running the multi-dimensional capability evaluation pipeline. This SKILL bypasses standard Cross-Entropy (CE) loss and provides direct quantitative measurements of the structural advantages of isomorphic (LoRA) vs. heterogeneous (FFT-RoPE/Hybrid) model architectures.
+
+---
+
+## 🌟 1. Core Evaluation Architecture
+
+The evaluation skill evaluates five core capabilities of trained models:
+
+```mermaid
+graph TD
+    A["Model Evaluation Skill Pipeline (skill_model_evaluation.py)"] --> B["Dimension 1: Attention Entropy"]
+    A --> C["Dimension 2: Representation Isotropy (SVD)"]
+    A --> D["Dimension 3: Context Extrapolation (Needle-in-a-Haystack)"]
+    A --> E["Dimension 4: Distractor Robustness"]
+    A --> F["Dimension 5: Periodic Motif Capture (Genomics)"]
+
+    B --> B1["H(A) = - Σ p * log(p) <br>Lower = Sharper focus"]
+    C --> C1["Singular Value Entropy <br>Higher = Uniform representation (No dimensional collapse)"]
+    D --> D1["QK Retrieval Ratio up to 8K tokens <br>Higher = Long-range global alignment"]
+    E --> E1["Context focus retention under random noise <br>Higher = Resilient to semantic drift"]
+    F --> F1["Spectral entropy ratio on periodic inputs <br>Higher = Captures structural periodicity"]
+```
+
+---
+
+## 📐 2. The Five Evaluation Dimensions
+
+### Dimension 1: Attention Entropy (專注度與結構化能力)
+* **Goal**: Measure how sharply focused the attention mechanism is when routing sequence coordinates.
+* **Mathematical Indicator**: Shannon Entropy of the attention weight distribution:
+  $$H(A) = - \sum_{j} A_{ij} \log A_{ij}$$
+  * **Evaluation Standard**: **Lower entropy = sharper attention focus**. This translates to high efficiency in sequence coordinate tracking and geometrical precision.
+
+### Dimension 2: Representation Isotropy (表徵空間各向同性與防維度崩塌)
+* **Goal**: Evaluate the distribution uniformity of token features in the hidden state space to avoid the "Narrow Cone Effect" (維度退化).
+* **Mathematical Indicator**: Singular Value Entropy derived from Singular Value Decomposition (SVD) on centered hidden states $X_{centered} = U \Sigma V^T$:
+  $$p(\sigma_i) = \frac{\sigma_i}{\sum_k \sigma_k}$$
+  $$\text{Isotropy Score} = \frac{-\sum_i p(\sigma_i) \log p(\sigma_i)}{\log D}$$
+  * **Evaluation Standard**: **Higher Isotropy Score (closer to 1.0) = richer, more uniform feature representation**. This proves the model uses all latent dimensions effectively and maintains high context capability.
+
+### Dimension 3: Context Length Extrapolation (長文本外推與檢索一致性)
+* **Goal**: Test if the model's query-key alignment degrades as context expands (Needle-in-a-Haystack validation).
+* **Mathematical Indicator**: Retrieval attention ratio at target lengths (from 128 to 4096+ tokens):
+  $$\text{Retrieval Ratio} = \frac{\text{Sum of QK attention on needle tokens}}{\text{Mean attention on distractor tokens}}$$
+  * **Evaluation Standard**: **Higher Retrieval Ratio = stronger positional consistency and context extrapolation capacity**.
+
+### Dimension 4: Context Distractor Robustness (抗干擾魯棒性)
+* **Goal**: Measure the query-key focus decay when random irrelevant sequences (distractors) are injected.
+* **Mathematical Indicator**: Context Retention Index (the sum of query-to-key attention weights after inserting varying amounts of distractors).
+  * **Evaluation Standard**: **Higher Retention = stronger alignment resilience against semantic drift**.
+
+### Dimension 5: Periodic Motif Capture (週期性結構特徵捕獲)
+* **Goal**: Evaluate how well the model parses periodic structural motifs (e.g. genomic start-stop codons in CPTAC or repeating loop blocks in code).
+* **Mathematical Indicator**: Periodic Capture Index (PCI) comparing the Shannon Spectral Entropy of features under repeating inputs vs. random inputs:
+  $$\text{PCI} = \frac{\text{Spectral Entropy (Random)}}{\text{Spectral Entropy (Periodic)}}$$
+  * **Evaluation Standard**: **Higher PCI = superior discovery of repeating harmonic structures in the sequence domain**.
+
+---
+
+## 💻 3. Skill Execution Runbook
+
+The execution engine is fully integrated into the workspace:
+👉 **[skill_model_evaluation.py](file:///mnt/home/caijingnina-gmai-11e66a/wisdomCoreV2/task03_CPT_gemma_1b/skill_model_evaluation.py)**
+
+### Step 1: Request a Compute Node via Slurm
+We must run evaluations on a GPU-enabled node. Request an interactive shell or submit a lightweight job:
+```bash
+srun --partition=p03 --nodes=1 --gres=gpu:1 --pty bash
+```
+
+### Step 2: Running the Evaluation Script
+Execute the script by selecting the targeted architecture configuration and checkpoint path.
+
+#### Option A: Evaluate Pure LoRA (Isomorphic)
+```bash
+python3 /mnt/home/caijingnina-gmai-11e66a/wisdomCoreV2/task03_CPT_gemma_1b/skill_model_evaluation.py \
+  --model lora \
+  --checkpoint ~/gemma3_cpt_checkpoints_1K_lora/final_gemma3_cpt_1k_lora.pth \
+  --output ~/lora_evaluation_report.json
+```
+
+#### Option B: Evaluate Pure FFT-RoPE (Heterogeneous)
+```bash
+python3 /mnt/home/caijingnina-gmai-11e66a/wisdomCoreV2/task03_CPT_gemma_1b/skill_model_evaluation.py \
+  --model fftrope \
+  --checkpoint ~/agigemma3_cpt_checkpoints_1K_fftrope/final_agigemma3_cpt_1k_fftrope.pth \
+  --output ~/fftrope_evaluation_report.json
+```
+
+#### Option C: Evaluate Hybrid Model (LoRA + FFT)
+```bash
+python3 /mnt/home/caijingnina-gmai-11e66a/wisdomCoreV2/task03_CPT_gemma_1b/skill_model_evaluation.py \
+  --model hybrid \
+  --checkpoint ~/agigemma3_cpt_checkpoints_1K_lorafftrope/final_agigemma3_cpt_1k_lorafftrope.pth \
+  --output ~/hybrid_evaluation_report.json
+```
+
+---
+
+## 📊 4. Structural Metrics Interpretation Guide
+
+Use this reference table to evaluate the outputs generated by the skill pipeline:
+
+| Dimension Metric | Target Metric Range | Ideal Behavior (Pure LoRA) | Ideal Behavior (FFT-RoPE) | Expected Winner / Rationale |
+| :--- | :---: | :---: | :---: | :---: |
+| **Attention Entropy** | $0.0 \sim \log(L)$ | High $\sim$ Mid (diffusion) | **Very Low** (sharp focus) | **FFT-RoPE / Hybrid** <br>Phase-locking acts as an explicit structural anchor, yielding sharp focus. |
+| **Isotropy Score** | $0.0 \sim 1.0$ | Low ($0.3 \sim 0.5$) | **Very High** ($0.8 \sim 0.95$) | **FFT-RoPE / Hybrid** <br>Frequency rotation naturally mitigates narrow cone collapsing. |
+| **Extrapolation Ratio @ 4K** | $> 10.0$ | Poor ($< 2.0$) | **Excellent** ($> 15.0$) | **FFT-RoPE / Hybrid** <br>Continuous phase coordinates maintain global consistency. |
+| **Distractor Robustness** | $0.0 \sim 1.0$ | Moderate decay | **High retention** | **FFT-RoPE / Hybrid** <br>Geometrical coordinates anchor attention from OOD noise. |
+| **Periodic Capture (PCI)** | $> 1.0$ | Near $1.0$ (struggles) | **High** ($> 1.5$) | **FFT-RoPE / Hybrid** <br>FFT phase updates specialize in capturing repeating patterns. |
+
+> [!TIP]
+> **Why the Hybrid model is highly anticipated:**
+> While Pure LoRA converges faster in early-stage CE token loss due to direct weight optimization, the Hybrid configuration combines the semantic fast-path of LoRA (r=4) with the structural stability and length resilience of FFT-RoPE. It is expected to yield the most balanced scores across all 5 dimensions.
+
+---
+
+## 🔧 5. Maintenance & Extensions
+* **Adding New Evaluation Data**: Modify the `evaluate_` methods in `skill_model_evaluation.py` to hook new layers or read different token indices.
+* **Batch Testing**: You can loop over multiple checkpoint steps to plot a learning curve of *Attention Entropy vs. Training Step*.
