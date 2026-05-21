@@ -99,20 +99,13 @@ class PureFFTBlock(nn.Module):
         window = window.to(dtype).unsqueeze(1)  # [W, 1]
         H_windowed = H * window  # [W, D]
 
-        # Perform causal channel-wise convolution using Unfold
+        # Depthwise conv1d (No flip needed because F.conv1d is cross-correlation)
+        weight = H_windowed.transpose(0, 1).unsqueeze(1)  # [D, 1, W]
         X_t = normed_X.transpose(1, 2)  # [B, D, L]
         X_padded = F.pad(X_t, (self.W - 1, 0))  # [B, D, L + W - 1]
-        X_unfold = X_padded.unfold(2, self.W, 1)  # [B, D, L, W]
         
-        # Transpose unfolded tensor to match weights
-        # X_unfold is [B, D, L, W]. We want it as [B, L, D, W] for multiplication.
-        X_unfold = X_unfold.permute(0, 2, 1, 3)  # [B, L, D, W]
-        # H_windowed is [W, D], transpose to [D, W] and reshape to [1, 1, D, W]
-        weight = H_windowed.transpose(0, 1).view(1, 1, D, self.W)
-        
-        # Element-wise product and sum over sliding window W
-        Y = torch.sum(X_unfold * weight, dim=-1)  # [B, L, D]
-        return X + Y
+        Y_t = F.conv1d(X_padded, weight, groups=D)  # [B, D, L]
+        return X + Y_t.transpose(1, 2)
 
 
 class DynamicPhaseLockFFTBlock(nn.Module):
@@ -144,40 +137,33 @@ class DynamicPhaseLockFFTBlock(nn.Module):
         gamma = torch.cat([torch.sin(args), torch.cos(args)], dim=-1).to(dtype)
         H = self.mlp_H(gamma)  # [W, D]
 
-        # 2. Causal Unfolding of the input signal
+        # 2. Causal Left-padding and unfolding
         X_t = normed_X.transpose(1, 2)  # [B, D, L]
         X_padded = F.pad(X_t, (self.W - 1, 0))  # [B, D, L + W - 1]
         X_unfold = X_padded.unfold(2, self.W, 1)  # [B, D, L, W]
-        # Transpose to [B, L, D, W] for easier processing
-        X_unfold = X_unfold.permute(0, 2, 1, 3)  # [B, L, D, W]
 
-        # 3. Dynamic Delay Extraction via causal cross-correlation with H
-        # H is [W, D], transpose to [D, W] and expand to [1, 1, D, W]
-        H_exp = H.transpose(0, 1).view(1, 1, D, self.W)
-        corr = torch.sum(X_unfold * H_exp, dim=-1)  # [B, L, D]
+        # 3. Dynamic Delay Extraction via causal cross-correlation with H (using fast Conv1d)
+        H_exp = H.transpose(0, 1).unsqueeze(1)  # [D, 1, W]
+        corr_t = F.conv1d(X_padded, H_exp, groups=D)  # [B, D, L]
         
         # Scale delay to a reasonable range (e.g., max shift of W // 4)
         max_delay = float(self.W // 4)
-        tau_d = torch.tanh(corr) * max_delay  # [B, L, D]
+        tau_d_t = torch.tanh(corr_t) * max_delay  # [B, D, L]
 
-        # 4. Generate Causal Sinc window weights dynamically
-        # grid is [W], expand to [1, 1, 1, W]
+        # 4. Generate Causal Sinc window weights dynamically in [B, D, L, W] layout
         grid = torch.arange(self.W, device=device, dtype=torch.float32).view(1, 1, 1, self.W)
-        # Hamming window of shape [1, 1, 1, W]
         t_w = torch.arange(self.W, device=device, dtype=torch.float32)
         window = 0.54 - 0.46 * torch.cos(2 * math.pi * t_w / (self.W - 1))
         window = window.to(dtype).view(1, 1, 1, self.W)
 
-        # Compute sinc(grid - tau_d)
-        # tau_d is [B, L, D], unsqueeze to [B, L, D, 1]
-        delta = grid - tau_d.unsqueeze(-1)  # [B, L, D, W]
+        # Compute sinc(grid - tau_d_t)
+        delta = grid - tau_d_t.unsqueeze(-1)  # [B, D, L, W]
         sinc_weights = torch.sinc(delta).to(dtype)
-        # Apply window
-        H_filter = sinc_weights * window  # [B, L, D, W]
+        H_filter = sinc_weights * window  # [B, D, L, W]
 
         # 5. Apply dynamic filter to the unfolded input
-        Y = torch.sum(X_unfold * H_filter, dim=-1)  # [B, L, D]
-        return X + Y
+        Y_t = torch.sum(X_unfold * H_filter, dim=-1)  # [B, D, L]
+        return X + Y_t.transpose(1, 2)
 
 
 

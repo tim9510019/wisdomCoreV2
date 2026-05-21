@@ -220,18 +220,13 @@ class PureFFTBlock(nn.Module):
         window = window.to(dtype).unsqueeze(1)  # [W, 1]
         H_windowed = H * window  # [W, D]
 
-        # 4. 因果左側零填充並展開 (Causal Unfold)
+        # 4. 因果深度一維卷積 (Depthwise Conv1d，無須翻轉因為 F.conv1d 是互相關)
+        weight = H_windowed.transpose(0, 1).unsqueeze(1)  # [D, 1, W]
         X_t = normed_X.transpose(1, 2)  # [B, D, L]
         X_padded = F.pad(X_t, (self.W - 1, 0))  # [B, D, L + W - 1]
-        X_unfold = X_padded.unfold(2, self.W, 1)  # [B, D, L, W]
         
-        # 轉置為 [B, L, D, W] 以進行通道獨立相乘
-        X_unfold = X_unfold.permute(0, 2, 1, 3)  # [B, L, D, W]
-        weight = H_windowed.transpose(0, 1).view(1, 1, D, self.W)
-        
-        # 進行卷積加總
-        Y = torch.sum(X_unfold * weight, dim=-1)  # [B, L, D]
-        return X + Y
+        Y_t = F.conv1d(X_padded, weight, groups=D)  # [B, D, L]
+        return X + Y_t.transpose(1, 2)
 
 
 class DynamicPhaseLockFFTBlock(nn.Module):
@@ -264,30 +259,29 @@ class DynamicPhaseLockFFTBlock(nn.Module):
         X_t = normed_X.transpose(1, 2)  # [B, D, L]
         X_padded = F.pad(X_t, (self.W - 1, 0))  # [B, D, L + W - 1]
         X_unfold = X_padded.unfold(2, self.W, 1)  # [B, D, L, W]
-        X_unfold = X_unfold.permute(0, 2, 1, 3)  # [B, L, D, W]
 
-        # 4. 藉由因果互相關 (Causal Cross-correlation) 動態提取時延 tau_d
-        H_exp = H.transpose(0, 1).view(1, 1, D, self.W)
-        corr = torch.sum(X_unfold * H_exp, dim=-1)  # [B, L, D]
+        # 4. 藉由因果互相關 (Causal Cross-correlation) 動態提取時延 tau_d_t (使用快速一維深度卷積)
+        H_exp = H.transpose(0, 1).unsqueeze(1)  # [D, 1, W]
+        corr_t = F.conv1d(X_padded, H_exp, groups=D)  # [B, D, L]
         
         # 限制時延最大偏移在 ±W//4 內
         max_delay = float(self.W // 4)
-        tau_d = torch.tanh(corr) * max_delay  # [B, L, D]
+        tau_d_t = torch.tanh(corr_t) * max_delay  # [B, D, L]
 
-        # 5. 生成 Causal Sinc 濾波器權重
+        # 5. 生成 Causal Sinc 濾波器權重 (在 [B, D, L, W] 佈局下高效率廣播，省去 unfolded tensor 的轉置)
         grid = torch.arange(self.W, device=device, dtype=torch.float32).view(1, 1, 1, self.W)
         t_w = torch.arange(self.W, device=device, dtype=torch.float32)
         window = 0.54 - 0.46 * torch.cos(2 * math.pi * t_w / (self.W - 1))
         window = window.to(dtype).view(1, 1, 1, self.W)
 
-        # 計算 sinc(grid - tau_d)
-        delta = grid - tau_d.unsqueeze(-1)  # [B, L, D, W]
+        # 計算 sinc(grid - tau_d_t)
+        delta = grid - tau_d_t.unsqueeze(-1)  # [B, D, L, W]
         sinc_weights = torch.sinc(delta).to(dtype)
-        H_filter = sinc_weights * window  # [B, L, D, W]
+        H_filter = sinc_weights * window  # [B, D, L, W]
 
         # 6. 套用濾波器並加總
-        Y = torch.sum(X_unfold * H_filter, dim=-1)  # [B, L, D]
-        return X + Y
+        Y_t = torch.sum(X_unfold * H_filter, dim=-1)  # [B, D, L]
+        return X + Y_t.transpose(1, 2)
 
 
 # ==========================================
