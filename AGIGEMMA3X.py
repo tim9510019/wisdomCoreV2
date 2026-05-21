@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 import math
 
-# 🌟 官方 FlashAttention 導入 (帶有極為穩健的 CPU/無CUDA相容性 Fallback 機制)
+# 🌟 官方 FlashAttention 導入
 try:
     from flash_attn import flash_attn_func
     HAS_FLASH_ATTN = True
@@ -99,17 +99,18 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 # ==========================================
-# 頻域縮放模組 (Spectral Downsampler & Upsampler)
+# 時域 Sinc 因果縮放模組 (Sinc Downsampler & Upsampler)
 # ==========================================
-class SpectralDownsampler(nn.Module):
+class SincDownsampler(nn.Module):
     """
-    頻域理想下採樣模組 (Spectral Downsampler)
-    在不破壞特徵能量密度的情況下，將序列長度從 L 理想降維至 L // factor
+    時域理想下採樣模組 (Sinc Downsampler)
+    採用深度因果 Sinc 濾波器，在時域對序列進行 100% 因果安全的低通下採樣。
     """
-    def __init__(self, factor=2):
+    def __init__(self, factor=2, W_down=64):
         super().__init__()
         assert factor > 0 and (factor & (factor - 1)) == 0, "下採樣倍數必須是 2 的冪次方"
         self.factor = factor
+        self.W_down = W_down
 
     def forward(self, X, n_split_index=None):
         B, L, D = X.shape
@@ -117,40 +118,41 @@ class SpectralDownsampler(nn.Module):
         if M == 1:
             return X
             
-        L_new = L // M
         device = X.device
         dtype = X.dtype
 
-        # 🌟 因果隔離：若傳入 n_split_index，將未來區段抹零，防止未來資訊在 RFFT 轉換時發生全局洩漏
-        if n_split_index is not None:
-            seq_range = torch.arange(L, device=device).unsqueeze(0)
-            past_mask = seq_range < n_split_index.unsqueeze(1)
-            X_input = X * past_mask.unsqueeze(-1).to(dtype)
-        else:
-            X_input = X
+        # 1. 構造時域因果 Sinc 低通濾波器
+        tau = torch.arange(self.W_down, device=device, dtype=torch.float32)
+        window = 0.54 - 0.46 * torch.cos(2 * math.pi * tau / (self.W_down - 1))
+        # sinc(tau / M) / M
+        h_weights = (torch.sinc(tau / M) / M) * window
+        h_weights = h_weights.to(dtype)  # [W_down]
 
-        # 頻域轉換
-        X_f = torch.fft.rfft(X_input.to(torch.float32), dim=1)  # [B, L // 2 + 1, D]
+        # 2. 進行深度因果一維卷積 (Depthwise Conv1d)
+        # X: [B, L, D] -> [B, D, L]
+        X_t = X.transpose(1, 2)
+        # 因果左側零填充 (Left-padding only)
+        X_padded = F.pad(X_t, (self.W_down - 1, 0))
         
-        # 理想低通濾波截斷
-        X_f_down = X_f[:, : L_new // 2 + 1, :]                  # [B, L_new // 2 + 1, D]
+        # 展開濾波器權重到每個通道上
+        weight = h_weights.view(1, 1, self.W_down).expand(D, 1, self.W_down)
         
-        # 逆變換還原時域
-        X_down = torch.fft.irfft(X_f_down, n=L_new, dim=1).to(dtype)
+        # 執行 stride = M 的卷積，以完成下採樣
+        Y_t = F.conv1d(X_padded, weight, stride=M, groups=D)  # [B, D, L // M]
         
-        # 能量振幅校正：除以 M 以保持均值與能量的一致性
-        return X_down / M
+        return Y_t.transpose(1, 2)
 
 
-class SpectralUpsampler(nn.Module):
+class SincUpsampler(nn.Module):
     """
-    頻域零填充上採樣模組 (Spectral Upsampler)
-    利用 Sinc 理想重構插值，將序列長度從 L_down 恢復至 L_down * factor
+    時域零填充上採樣模組 (Sinc Upsampler)
+    利用時域 Sinc 理想重構插值，將序列進行 100% 因果低通濾波上採樣。
     """
-    def __init__(self, factor=2):
+    def __init__(self, factor=2, W_up=64):
         super().__init__()
         assert factor > 0 and (factor & (factor - 1)) == 0, "上採樣倍數必須是 2 的冪次方"
         self.factor = factor
+        self.W_up = W_up
 
     def forward(self, X_down):
         M = self.factor
@@ -162,28 +164,39 @@ class SpectralUpsampler(nn.Module):
         device = X_down.device
         dtype = X_down.dtype
 
-        # 頻域轉換
-        X_f_down = torch.fft.rfft(X_down.to(torch.float32), dim=1)  # [B, L_down // 2 + 1, D]
+        # 1. 進行零填充上採樣 (Zero-insertion)
+        X_zero = torch.zeros(B, L_new, D, device=device, dtype=dtype)
+        X_zero[:, ::M, :] = X_down
+
+        # 2. 構造時域因果 Sinc 插值濾波器
+        tau = torch.arange(self.W_up, device=device, dtype=torch.float32)
+        window = 0.54 - 0.46 * torch.cos(2 * math.pi * tau / (self.W_up - 1))
+        # sinc(tau / M) * M
+        h_weights = torch.sinc(tau / M) * M * window
+        h_weights = h_weights.to(dtype)  # [W_up]
+
+        # 3. 進行深度因果一維卷積
+        X_t = X_zero.transpose(1, 2)
+        X_padded = F.pad(X_t, (self.W_up - 1, 0))
         
-        # 高頻零填充 (Zero-Padding)
-        pad_size = (L_new // 2 + 1) - (L_down // 2 + 1)
-        # F.pad 從最後一個維度向左進行填充，我們填充頻域維度(dim=1)，對應 [B, F, D] 的倒數第二維
-        X_f = F.pad(X_f_down, (0, 0, 0, pad_size))                 # [B, L_new // 2 + 1, D]
+        weight = h_weights.view(1, 1, self.W_up).expand(D, 1, self.W_up)
         
-        # 逆變換還原時域
-        X_up = torch.fft.irfft(X_f, n=L_new, dim=1).to(dtype)
+        Y_t = F.conv1d(X_padded, weight, groups=D)  # [B, D, L_new]
         
-        # 能量振幅校正：乘以 M 以保持重建信號的振幅規模
-        return X_up * M
+        return Y_t.transpose(1, 2)
 
 
 # ==========================================
-# FFT 濾波器核心網路區塊
+# Causal Sinc 核心區塊 (100% Causal)
 # ==========================================
 class PureFFTBlock(nn.Module):
-    def __init__(self, D=1152, K=1024):
+    """
+    時域 Causal Sinc 靜態卷積區塊 (替換 PureFFTBlock，參數量與名稱 100% 相同)
+    """
+    def __init__(self, D=1152, K=1024, W=64):
         super().__init__()
         self.fft_norm = GemmaRMSNorm(D)
+        self.W = W
         self.omegas = nn.Parameter(torch.randn(K))
         self.mlp_H = nn.Sequential(nn.Linear(2 * K, D), nn.GELU(), nn.Linear(D, D))
 
@@ -192,34 +205,43 @@ class PureFFTBlock(nn.Module):
         device = X.device
         dtype = X.dtype
 
-        if n_split_index is not None:
-            seq_range = torch.arange(L, device=device).unsqueeze(0)
-            past_mask = seq_range < n_split_index.unsqueeze(1)
-            X_past = X * past_mask.unsqueeze(-1).to(dtype)
-        else:
-            X_past = X
+        # 1. 進行 RMSNorm 歸一化
+        normed_X = self.fft_norm(X)
 
-        normed_X_fft = self.fft_norm(X_past)
-        t = torch.arange(L, device=device, dtype=torch.float32)
+        # 2. 生成長度為 W 的期望波形 H
+        t = torch.arange(self.W, device=device, dtype=torch.float32)
         args = t.unsqueeze(1) * self.omegas.unsqueeze(0).to(torch.float32)
         gamma = torch.cat([torch.sin(args), torch.cos(args)], dim=-1).to(dtype)
-        H = self.mlp_H(gamma)
+        H = self.mlp_H(gamma)  # [W, D]
 
-        X_pad = F.pad(normed_X_fft, (0, 0, 0, L))
-        H_pad = F.pad(H, (0, 0, 0, L))
-        X_f = torch.fft.rfft(X_pad.to(torch.float32), dim=1)
-        H_f = torch.fft.rfft(H_pad.to(torch.float32), dim=0).unsqueeze(0)
-        Y_f = X_f * torch.conj(H_f)
-        Y_sys1 = torch.fft.irfft(Y_f, n=2 * L, dim=1).to(dtype)[:, :L, :]
+        # 3. 施加漢明因果窗 (Hamming Causal Window)
+        t_w = torch.arange(self.W, device=device, dtype=torch.float32)
+        window = 0.54 - 0.46 * torch.cos(2 * math.pi * t_w / (self.W - 1))
+        window = window.to(dtype).unsqueeze(1)  # [W, 1]
+        H_windowed = H * window  # [W, D]
 
-        Output = X + Y_sys1
-        return Output
+        # 4. 因果左側零填充並展開 (Causal Unfold)
+        X_t = normed_X.transpose(1, 2)  # [B, D, L]
+        X_padded = F.pad(X_t, (self.W - 1, 0))  # [B, D, L + W - 1]
+        X_unfold = X_padded.unfold(2, self.W, 1)  # [B, D, L, W]
+        
+        # 轉置為 [B, L, D, W] 以進行通道獨立相乘
+        X_unfold = X_unfold.permute(0, 2, 1, 3)  # [B, L, D, W]
+        weight = H_windowed.transpose(0, 1).view(1, 1, D, self.W)
+        
+        # 進行卷積加總
+        Y = torch.sum(X_unfold * weight, dim=-1)  # [B, L, D]
+        return X + Y
 
 
 class DynamicPhaseLockFFTBlock(nn.Module):
-    def __init__(self, D=1152, K=1024):
+    """
+    動態相位鎖定 Causal Sinc 卷積區塊 (資料驅動版，參數量與 PureFFTBlock 100% 相同)
+    """
+    def __init__(self, D=1152, K=1024, W=64):
         super().__init__()
         self.fft_norm = GemmaRMSNorm(D)
+        self.W = W
         self.omegas = nn.Parameter(torch.randn(K))
         self.mlp_H = nn.Sequential(nn.Linear(2 * K, D), nn.GELU(), nn.Linear(D, D))
         self.eps = 1e-8
@@ -229,40 +251,42 @@ class DynamicPhaseLockFFTBlock(nn.Module):
         device = X.device
         dtype = X.dtype
 
-        # 1. 因果隔離
-        if n_split_index is not None:
-            seq_range = torch.arange(L, device=device).unsqueeze(0)
-            past_mask = seq_range < n_split_index.unsqueeze(1)
-            X_past = X * past_mask.unsqueeze(-1).to(dtype)
-        else:
-            X_past = X
+        # 1. 進行 RMSNorm 歸一化
+        normed_X = self.fft_norm(X)
 
-        normed_X_past = self.fft_norm(X_past)
-        normed_X_full = self.fft_norm(X)
-
-        # 2. 位置相關期望信號
-        t = torch.arange(L, device=device, dtype=torch.float32)
+        # 2. 生成長度為 W 的期望波形 H
+        t = torch.arange(self.W, device=device, dtype=torch.float32)
         args = t.unsqueeze(1) * self.omegas.unsqueeze(0).to(torch.float32)
         gamma = torch.cat([torch.sin(args), torch.cos(args)], dim=-1).to(dtype)
-        H = self.mlp_H(gamma)  # [L, D]
+        H = self.mlp_H(gamma)  # [W, D]
 
-        # 3. 頻域動態相位鎖定
-        S_f = torch.fft.rfft(normed_X_past.float(), dim=1)           # [B, L//2+1, D]
-        H_f = torch.fft.rfft(H.float(), dim=0).unsqueeze(0)         # [1, L//2+1, D]
-        V_f = torch.fft.rfft(normed_X_full.float(), dim=1)           # [B, L//2+1, D]
+        # 3. 因果左側零填充與展開
+        X_t = normed_X.transpose(1, 2)  # [B, D, L]
+        X_padded = F.pad(X_t, (self.W - 1, 0))  # [B, D, L + W - 1]
+        X_unfold = X_padded.unfold(2, self.W, 1)  # [B, D, L, W]
+        X_unfold = X_unfold.permute(0, 2, 1, 3)  # [B, L, D, W]
 
-        # 互功率譜：過去信號 × 期望信號的共軛
-        C_f = S_f * torch.conj(H_f)
-        magnitude = torch.abs(C_f)
+        # 4. 藉由因果互相關 (Causal Cross-correlation) 動態提取時延 tau_d
+        H_exp = H.transpose(0, 1).view(1, 1, D, self.W)
+        corr = torch.sum(X_unfold * H_exp, dim=-1)  # [B, L, D]
+        
+        # 限制時延最大偏移在 ±W//4 內
+        max_delay = float(self.W // 4)
+        tau_d = torch.tanh(corr) * max_delay  # [B, L, D]
 
-        # 軟性相位歸一化
-        mean_energy = magnitude.mean(dim=1, keepdim=True)
-        Phi_f = C_f / (magnitude + mean_energy + self.eps)
+        # 5. 生成 Causal Sinc 濾波器權重
+        grid = torch.arange(self.W, device=device, dtype=torch.float32).view(1, 1, 1, self.W)
+        t_w = torch.arange(self.W, device=device, dtype=torch.float32)
+        window = 0.54 - 0.46 * torch.cos(2 * math.pi * t_w / (self.W - 1))
+        window = window.to(dtype).view(1, 1, 1, self.W)
 
-        # 將動態相位修正施加到完整序列
-        Y_f = V_f * Phi_f
-        Y = torch.fft.irfft(Y_f, n=L, dim=1).to(dtype)
+        # 計算 sinc(grid - tau_d)
+        delta = grid - tau_d.unsqueeze(-1)  # [B, L, D, W]
+        sinc_weights = torch.sinc(delta).to(dtype)
+        H_filter = sinc_weights * window  # [B, L, D, W]
 
+        # 6. 套用濾波器並加總
+        Y = torch.sum(X_unfold * H_filter, dim=-1)  # [B, L, D]
         return X + Y
 
 
@@ -381,9 +405,9 @@ class AGIGEMMA3X(nn.Module):
             [_make_fft() for _ in range(N_fft_F)]
         )
 
-        # 🌟 頻域縮放模組
-        self.downsampler = SpectralDownsampler(factor=downsample_factor)
-        self.upsampler = SpectralUpsampler(factor=downsample_factor)
+        # 🌟 時域 Sinc 縮放模組
+        self.downsampler = SincDownsampler(factor=downsample_factor)
+        self.upsampler = SincUpsampler(factor=downsample_factor)
 
         # Gemma3 主體 Block 組群
         self.blocks = nn.ModuleList()
@@ -421,7 +445,7 @@ class AGIGEMMA3X(nn.Module):
         for block in self.pre_fft_blocks:
             out = block(out, shift_size=0, n_split_index=n_split_index)
 
-        # 2. 頻域降維
+        # 2. 降維
         out_down = self.downsampler(out, n_split_index=n_split_index)
 
         # 3. 因果分隔線按比例縮放
@@ -434,7 +458,7 @@ class AGIGEMMA3X(nn.Module):
         for block in self.blocks:
             out_down = block(out_down, shift_size=0, n_split_index=n_split_index_down)
 
-        # 5. 頻域升維 (Sinc 完美插值還原長度)
+        # 5. 升維
         out = self.upsampler(out_down)
 
         # 6. 後置 FFT
@@ -476,7 +500,7 @@ class AGIGEMMA3XForCausalLM(nn.Module):
                     hidden_states, shift_size=0, n_split_index=n_split_index
                 )
 
-        # 3. 頻域下採樣降維 (時域序列 L -> L // M)
+        # 3. 下採樣降維 (時域序列 L -> L // M)
         hidden_states_down = self.base_model.downsampler(hidden_states, n_split_index=n_split_index)
 
         # 4. 縮放因果隔離位置
@@ -498,7 +522,7 @@ class AGIGEMMA3XForCausalLM(nn.Module):
                     hidden_states_down, shift_size=shift_size_down, n_split_index=n_split_index_down
                 )
 
-        # 6. 頻域上採樣升維 (時域序列 L // M -> L)
+        # 6. 上採樣升維 (時域序列 L // M -> L)
         hidden_states = self.base_model.upsampler(hidden_states_down)
 
         # 7. 穿透後置 4 層外層 FFT

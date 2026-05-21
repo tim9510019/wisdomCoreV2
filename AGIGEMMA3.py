@@ -72,9 +72,10 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class PureFFTBlock(nn.Module):
-    def __init__(self, D=1152, K=1024):
+    def __init__(self, D=1152, K=1024, W=64):
         super().__init__()
         self.fft_norm = GemmaRMSNorm(D)
+        self.W = W
         self.omegas = nn.Parameter(torch.randn(K))
         self.mlp_H = nn.Sequential(nn.Linear(2 * K, D), nn.GELU(), nn.Linear(D, D))
 
@@ -83,60 +84,48 @@ class PureFFTBlock(nn.Module):
         device = X.device
         dtype = X.dtype
 
-        if n_split_index is not None:
-            seq_range = torch.arange(L, device=device).unsqueeze(0)
-            past_mask = seq_range < n_split_index.unsqueeze(1)
-            X_past = X * past_mask.unsqueeze(-1).to(dtype)
-        else:
-            X_past = X
+        # Apply RMSNorm
+        normed_X = self.fft_norm(X)
 
-        normed_X_fft = self.fft_norm(X_past)
-        t = torch.arange(L, device=device, dtype=torch.float32)
+        # Generate the expectation wave H of length W (sliding window size)
+        t = torch.arange(self.W, device=device, dtype=torch.float32)
         args = t.unsqueeze(1) * self.omegas.unsqueeze(0).to(torch.float32)
         gamma = torch.cat([torch.sin(args), torch.cos(args)], dim=-1).to(dtype)
-        H = self.mlp_H(gamma)
+        H = self.mlp_H(gamma)  # [W, D]
 
-        X_pad = F.pad(normed_X_fft, (0, 0, 0, L))
-        H_pad = F.pad(H, (0, 0, 0, L))
-        X_f = torch.fft.rfft(X_pad.to(torch.float32), dim=1)
-        H_f = torch.fft.rfft(H_pad.to(torch.float32), dim=0).unsqueeze(0)
-        Y_f = X_f * torch.conj(H_f)
-        Y_sys1 = torch.fft.irfft(Y_f, n=2 * L, dim=1).to(dtype)[:, :L, :]
+        # Apply causal windowing to H (Hamming window)
+        t_w = torch.arange(self.W, device=device, dtype=torch.float32)
+        window = 0.54 - 0.46 * torch.cos(2 * math.pi * t_w / (self.W - 1))
+        window = window.to(dtype).unsqueeze(1)  # [W, 1]
+        H_windowed = H * window  # [W, D]
 
-        Output = X + Y_sys1
-        return Output
+        # Perform causal channel-wise convolution using Unfold
+        X_t = normed_X.transpose(1, 2)  # [B, D, L]
+        X_padded = F.pad(X_t, (self.W - 1, 0))  # [B, D, L + W - 1]
+        X_unfold = X_padded.unfold(2, self.W, 1)  # [B, D, L, W]
+        
+        # Transpose unfolded tensor to match weights
+        # X_unfold is [B, D, L, W]. We want it as [B, L, D, W] for multiplication.
+        X_unfold = X_unfold.permute(0, 2, 1, 3)  # [B, L, D, W]
+        # H_windowed is [W, D], transpose to [D, W] and reshape to [1, 1, D, W]
+        weight = H_windowed.transpose(0, 1).view(1, 1, D, self.W)
+        
+        # Element-wise product and sum over sliding window W
+        Y = torch.sum(X_unfold * weight, dim=-1)  # [B, L, D]
+        return X + Y
 
 
 class DynamicPhaseLockFFTBlock(nn.Module):
     """
-    動態相位鎖定 FFT Block（資料驅動版，參數量與 PureFFTBlock 完全相同）
+    動態相位鎖定 Causal Sinc Block（資料驅動版，參數量與 PureFFTBlock 100% 相同）
 
-    使用與 PureFFTBlock 完全相同的參數結構 (fft_norm, omegas, mlp_H)，
-    但改變前向計算方式：
-
-    PureFFTBlock:  Y = IFFT(FFT(X_past) ⊙ conj(FFT(H)))  — H 作為靜態卷積核
-    本 Block:      Φ = Normalize(FFT(X_past) ⊙ conj(FFT(H)))
-                   Y = IFFT(FFT(X_full) ⊙ Φ)              — 動態相位修正
-
-    數學推導：
-      H(t) = MLP(sin(ωt), cos(ωt))           — 位置相關的期望信號（可學習）
-      S_f = FFT(X_past)                       — 過去信號的頻譜
-      H_f = FFT(H)                            — 期望信號的頻譜
-      C_f = S_f ⊙ conj(H_f)                  — 互功率譜
-      Φ_f = C_f / (|C_f| + μ + ε)            — 軟性歸一化 → 提取純相位
-      V_f = FFT(X_full)                       — 完整序列的頻譜
-      Y = IFFT(V_f ⊙ Φ_f)                    — 將相位修正施加到完整序列
-      Output = X + Y
-
-    核心差異：
-      - PureFFTBlock: 直接用互功率譜的原始值（含幅度），等效固定 FIR 卷積
-      - 本 Block: 歸一化後只保留相位資訊，高能量頻段→純旋轉，低能量→自動靜音
-      - 本 Block: 相位修正施加到「完整序列 X_full」而非僅 X_past
+    使用時域 Causal Sinc 卷積代替頻域 RFFT，完全杜絕未來資訊洩漏。
+    利用自迴歸因果互相關動態提取時域位移量（相位鎖定），無須任何額外參數。
     """
-
-    def __init__(self, D=1152, K=1024):
+    def __init__(self, D=1152, K=1024, W=64):
         super().__init__()
         self.fft_norm = GemmaRMSNorm(D)
+        self.W = W
         self.omegas = nn.Parameter(torch.randn(K))
         self.mlp_H = nn.Sequential(nn.Linear(2 * K, D), nn.GELU(), nn.Linear(D, D))
         self.eps = 1e-8
@@ -146,43 +135,50 @@ class DynamicPhaseLockFFTBlock(nn.Module):
         device = X.device
         dtype = X.dtype
 
-        # 1. 因果隔離
-        if n_split_index is not None:
-            seq_range = torch.arange(L, device=device).unsqueeze(0)
-            past_mask = seq_range < n_split_index.unsqueeze(1)
-            X_past = X * past_mask.unsqueeze(-1).to(dtype)
-        else:
-            X_past = X
+        # Apply RMSNorm
+        normed_X = self.fft_norm(X)
 
-        normed_X_past = self.fft_norm(X_past)
-        normed_X_full = self.fft_norm(X)
-
-        # 2. 位置相關期望信號（與 PureFFTBlock 完全相同的參數與計算）
-        t = torch.arange(L, device=device, dtype=torch.float32)
+        # 1. Generate the expectation wave H of length W (sliding window size)
+        t = torch.arange(self.W, device=device, dtype=torch.float32)
         args = t.unsqueeze(1) * self.omegas.unsqueeze(0).to(torch.float32)
         gamma = torch.cat([torch.sin(args), torch.cos(args)], dim=-1).to(dtype)
-        H = self.mlp_H(gamma)  # [L, D]
+        H = self.mlp_H(gamma)  # [W, D]
 
-        # 3. 頻域動態相位鎖定
-        S_f = torch.fft.rfft(normed_X_past.float(), dim=1)           # [B, L//2+1, D]
-        H_f = torch.fft.rfft(H.float(), dim=0).unsqueeze(0)         # [1, L//2+1, D]
-        V_f = torch.fft.rfft(normed_X_full.float(), dim=1)           # [B, L//2+1, D]
+        # 2. Causal Unfolding of the input signal
+        X_t = normed_X.transpose(1, 2)  # [B, D, L]
+        X_padded = F.pad(X_t, (self.W - 1, 0))  # [B, D, L + W - 1]
+        X_unfold = X_padded.unfold(2, self.W, 1)  # [B, D, L, W]
+        # Transpose to [B, L, D, W] for easier processing
+        X_unfold = X_unfold.permute(0, 2, 1, 3)  # [B, L, D, W]
 
-        # 互功率譜：過去信號 × 期望信號的共軛
-        C_f = S_f * torch.conj(H_f)
-        magnitude = torch.abs(C_f)
+        # 3. Dynamic Delay Extraction via causal cross-correlation with H
+        # H is [W, D], transpose to [D, W] and expand to [1, 1, D, W]
+        H_exp = H.transpose(0, 1).view(1, 1, D, self.W)
+        corr = torch.sum(X_unfold * H_exp, dim=-1)  # [B, L, D]
+        
+        # Scale delay to a reasonable range (e.g., max shift of W // 4)
+        max_delay = float(self.W // 4)
+        tau_d = torch.tanh(corr) * max_delay  # [B, L, D]
 
-        # 軟性相位歸一化
-        # - |C_f(k)| >> μ → Φ_f(k) ≈ e^{iθ(k)}（純相位旋轉）
-        # - |C_f(k)| << μ → Φ_f(k) ≈ 0（自動靜音雜訊頻段）
-        mean_energy = magnitude.mean(dim=1, keepdim=True)
-        Phi_f = C_f / (magnitude + mean_energy + self.eps)
+        # 4. Generate Causal Sinc window weights dynamically
+        # grid is [W], expand to [1, 1, 1, W]
+        grid = torch.arange(self.W, device=device, dtype=torch.float32).view(1, 1, 1, self.W)
+        # Hamming window of shape [1, 1, 1, W]
+        t_w = torch.arange(self.W, device=device, dtype=torch.float32)
+        window = 0.54 - 0.46 * torch.cos(2 * math.pi * t_w / (self.W - 1))
+        window = window.to(dtype).view(1, 1, 1, self.W)
 
-        # 將動態相位修正施加到完整序列
-        Y_f = V_f * Phi_f
-        Y = torch.fft.irfft(Y_f, n=L, dim=1).to(dtype)
+        # Compute sinc(grid - tau_d)
+        # tau_d is [B, L, D], unsqueeze to [B, L, D, 1]
+        delta = grid - tau_d.unsqueeze(-1)  # [B, L, D, W]
+        sinc_weights = torch.sinc(delta).to(dtype)
+        # Apply window
+        H_filter = sinc_weights * window  # [B, L, D, W]
 
+        # 5. Apply dynamic filter to the unfolded input
+        Y = torch.sum(X_unfold * H_filter, dim=-1)  # [B, L, D]
         return X + Y
+
 
 
 class Gemma3DecoderLayer(nn.Module):
