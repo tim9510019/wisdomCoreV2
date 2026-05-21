@@ -1,4 +1,4 @@
-# trainCPTAC_AGI_GEMMA3_1K_NV.py — AGI GEMMA 3 (前N後N純FFT) 持續預訓練引擎
+# trainCPTAC_AGI_GEMMA3_1K_DYN.py — AGI GEMMA 3 (前N後N動態相位鎖定FFT) DYNAMIC 模式對照實驗
 import os
 import sys
 import csv
@@ -42,8 +42,8 @@ N_FFT_B = 4
 
 MODEL_ID = "google/gemma-3-1b-it"
 DATASET_DIR = "~/agiv2_stage1_1K"
-SAVE_DIR = "~/agigemma3_cpt_checkpoints_1K_NV"
-LOG_PATH = "~/agigemma3_cpt_1k_NV_log.csv"
+SAVE_DIR = "~/agigemma3_cpt_checkpoints_1K_DYN"
+LOG_PATH = "~/agigemma3_cpt_1k_DYN_log.csv"
 
 DATASET_DIR = os.path.expanduser(DATASET_DIR)
 SAVE_DIR = os.path.expanduser(SAVE_DIR)
@@ -63,7 +63,7 @@ ROPE_LOCAL = 10000.0
 ROPE_GLOBAL = 1000000.0
 
 # HuggingFace 自動上傳配置
-REPO_ID = "tim9510019/AGIGEMMA3-1B-CPT_1K_NV"
+REPO_ID = "tim9510019/AGIGEMMA3-1B-CPT_1K_DYN"
 HF_CE_LOSS_THRESHOLD = 2.65
 
 
@@ -355,7 +355,7 @@ class AGIGEMMA3ForCausalLM(nn.Module):
 # ==========================================
 def main():
     print(
-        f"\n🚀 啟動 AGIGEMMA3 CPT 訓練矩陣 (前 {N_FFT_F} 後 {N_FFT_B} 層純 FFT 架構 + 原生權重起步)..."
+        f"\n🚀 啟動 AGIGEMMA3 CPT 訓練矩陣 [DYNAMIC 模式] (前 {N_FFT_F} 後 {N_FFT_B} 層動態相位鎖定FFT + Gemma3 權重凍結)..."
     )
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -389,7 +389,7 @@ def main():
         N_fft_B=N_FFT_B,
         rope_local=ROPE_LOCAL,
         rope_global=ROPE_GLOBAL,
-        # fft_block_type="dynamic",  # 🌟 切換到動態相位鎖定 FFT Block（參數量一致）
+        fft_block_type="dynamic",  # 🌟 DYNAMIC 模式
     )
 
     print("\n🔄 正在掛載原生 google/gemma-3-1b-it 權重...")
@@ -399,12 +399,11 @@ def main():
     model = AGIGEMMA3ForCausalLM(base, use_gc=True)
     print("✅ 模型實例化完成，並成功接合官方預訓練特徵。")
 
-    print("\n🔧 啟動全參數訓練設定:")
-    for param in model.parameters():
-        param.requires_grad = True
-
+    # 🔒 Gemma3 主幹凍結，只訓練 FFT blocks
+    # transplant_and_freeze 已自動凍結 Gemma3 原生權重、開放 FFT 新增層
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"✅ 設定完成。可訓練參數總量: {trainable_params:,} (100% 全開)")
+    frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    print(f"🔒 Gemma3 凍結參數: {frozen_params:,} | 🟢 FFT 可訓練參數: {trainable_params:,}")
 
     model = model.cuda().to(torch.bfloat16)
 

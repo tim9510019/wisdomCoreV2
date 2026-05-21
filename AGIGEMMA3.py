@@ -107,6 +107,84 @@ class PureFFTBlock(nn.Module):
         return Output
 
 
+class DynamicPhaseLockFFTBlock(nn.Module):
+    """
+    動態相位鎖定 FFT Block（資料驅動版，參數量與 PureFFTBlock 完全相同）
+
+    使用與 PureFFTBlock 完全相同的參數結構 (fft_norm, omegas, mlp_H)，
+    但改變前向計算方式：
+
+    PureFFTBlock:  Y = IFFT(FFT(X_past) ⊙ conj(FFT(H)))  — H 作為靜態卷積核
+    本 Block:      Φ = Normalize(FFT(X_past) ⊙ conj(FFT(H)))
+                   Y = IFFT(FFT(X_full) ⊙ Φ)              — 動態相位修正
+
+    數學推導：
+      H(t) = MLP(sin(ωt), cos(ωt))           — 位置相關的期望信號（可學習）
+      S_f = FFT(X_past)                       — 過去信號的頻譜
+      H_f = FFT(H)                            — 期望信號的頻譜
+      C_f = S_f ⊙ conj(H_f)                  — 互功率譜
+      Φ_f = C_f / (|C_f| + μ + ε)            — 軟性歸一化 → 提取純相位
+      V_f = FFT(X_full)                       — 完整序列的頻譜
+      Y = IFFT(V_f ⊙ Φ_f)                    — 將相位修正施加到完整序列
+      Output = X + Y
+
+    核心差異：
+      - PureFFTBlock: 直接用互功率譜的原始值（含幅度），等效固定 FIR 卷積
+      - 本 Block: 歸一化後只保留相位資訊，高能量頻段→純旋轉，低能量→自動靜音
+      - 本 Block: 相位修正施加到「完整序列 X_full」而非僅 X_past
+    """
+
+    def __init__(self, D=1152, K=1024):
+        super().__init__()
+        self.fft_norm = GemmaRMSNorm(D)
+        self.omegas = nn.Parameter(torch.randn(K))
+        self.mlp_H = nn.Sequential(nn.Linear(2 * K, D), nn.GELU(), nn.Linear(D, D))
+        self.eps = 1e-8
+
+    def forward(self, X, shift_size=0, n_split_index=None):
+        B, L, D = X.shape
+        device = X.device
+        dtype = X.dtype
+
+        # 1. 因果隔離
+        if n_split_index is not None:
+            seq_range = torch.arange(L, device=device).unsqueeze(0)
+            past_mask = seq_range < n_split_index.unsqueeze(1)
+            X_past = X * past_mask.unsqueeze(-1).to(dtype)
+        else:
+            X_past = X
+
+        normed_X_past = self.fft_norm(X_past)
+        normed_X_full = self.fft_norm(X)
+
+        # 2. 位置相關期望信號（與 PureFFTBlock 完全相同的參數與計算）
+        t = torch.arange(L, device=device, dtype=torch.float32)
+        args = t.unsqueeze(1) * self.omegas.unsqueeze(0).to(torch.float32)
+        gamma = torch.cat([torch.sin(args), torch.cos(args)], dim=-1).to(dtype)
+        H = self.mlp_H(gamma)  # [L, D]
+
+        # 3. 頻域動態相位鎖定
+        S_f = torch.fft.rfft(normed_X_past.float(), dim=1)           # [B, L//2+1, D]
+        H_f = torch.fft.rfft(H.float(), dim=0).unsqueeze(0)         # [1, L//2+1, D]
+        V_f = torch.fft.rfft(normed_X_full.float(), dim=1)           # [B, L//2+1, D]
+
+        # 互功率譜：過去信號 × 期望信號的共軛
+        C_f = S_f * torch.conj(H_f)
+        magnitude = torch.abs(C_f)
+
+        # 軟性相位歸一化
+        # - |C_f(k)| >> μ → Φ_f(k) ≈ e^{iθ(k)}（純相位旋轉）
+        # - |C_f(k)| << μ → Φ_f(k) ≈ 0（自動靜音雜訊頻段）
+        mean_energy = magnitude.mean(dim=1, keepdim=True)
+        Phi_f = C_f / (magnitude + mean_energy + self.eps)
+
+        # 將動態相位修正施加到完整序列
+        Y_f = V_f * Phi_f
+        Y = torch.fft.irfft(Y_f, n=L, dim=1).to(dtype)
+
+        return X + Y
+
+
 class Gemma3DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -190,14 +268,21 @@ class AGIGEMMA3(nn.Module):
         head_dim=256,
         rope_local=10000.0,
         rope_global=1000000.0,
+        fft_block_type="pure",  # "pure" = 原始 PureFFTBlock, "dynamic" = 動態相位鎖定
     ):
         super().__init__()
         self.D = D
         self.embedding = nn.Embedding(vocab_size, D)
 
+        # 選擇 FFT Block 類型
+        if fft_block_type == "dynamic":
+            _make_fft = lambda: DynamicPhaseLockFFTBlock(D=D, K=K)
+        else:
+            _make_fft = lambda: PureFFTBlock(D=D, K=K)
+
         # 前 N 層 FFT
         self.pre_fft_blocks = nn.ModuleList(
-            [PureFFTBlock(D=D, K=K) for _ in range(N_fft_F)]
+            [_make_fft() for _ in range(N_fft_F)]
         )
 
         self.blocks = nn.ModuleList()
@@ -220,7 +305,7 @@ class AGIGEMMA3(nn.Module):
 
         # 後 N 層 FFT
         self.post_fft_blocks = nn.ModuleList(
-            [PureFFTBlock(D=D, K=K) for _ in range(N_fft_B)]
+            [_make_fft() for _ in range(N_fft_B)]
         )
 
         self.final_norm = GemmaRMSNorm(D)
