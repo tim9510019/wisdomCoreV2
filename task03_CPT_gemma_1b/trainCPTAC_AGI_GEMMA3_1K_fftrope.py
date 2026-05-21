@@ -1,4 +1,4 @@
-# trainCPTAC_AGI_GEMMA3_1K_fftrope.py — AGI GEMMA 3 FFT 動態相位鎖定微調預訓練引擎 (GEMM 全凍結，745,472 可訓練參數，物理隔離)
+# trainCPTAC_AGI_GEMMA3_1K_fftrope.py — AGI GEMMA 3 1D Depthwise Conv + Sinc Causal 微調預訓練引擎 (GEMM 全凍結，745,472 可訓練參數，物理隔離)
 import os
 import sys
 import csv
@@ -66,15 +66,15 @@ REPO_ID = "tim9510019/AGIGEMMA3-1B-CPT_1K_fftrope"
 HF_CE_LOSS_THRESHOLD = 3.9          # 只有 ce_loss 低於此值才觸發上傳
 
 # ==========================================
-# [ 物理隔離：FFT 動態相位鎖定 RoPE 模組 ]
+# [ 物理隔離：時域 Sinc Causal 卷積 RoPE 模組 ]
 # ==========================================
-class FFTPhaseLockRoPE(nn.Module):
-    def __init__(self, num_layers=26, num_heads=4, head_dim=256, target_params=745472):
+class SincCausalRoPE(nn.Module):
+    def __init__(self, num_layers=26, num_heads=4, head_dim=256, target_params=745472, W=64):
         """
         物理隔離的獨立調製模組。
         內部封裝一個長度完全精準相等的 745,472 可訓練參數張量，
         為每層分配 28,672 個參數（變形為 112 x 256 的相位調製矩陣），
-        透過 1D 實數 FFT 提取特徵的頻域相位進行動態調製。
+        透過 1D Causal Sinc 卷積 (Depthwise Conv1d) 在時域上提取特徵並調製 RoPE 角度。
         """
         super().__init__()
         self.weight = nn.Parameter(torch.empty(target_params, dtype=torch.float32))
@@ -85,19 +85,20 @@ class FFTPhaseLockRoPE(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.params_per_layer = target_params // num_layers # 28,672
+        self.W = W
         
     def forward(self, x, layer_idx):
         # x shape: (B, L, D) 來自於 decoder block 的 normed input，D = 1152
         B, L, D = x.shape
         device = x.device
+        dtype = x.dtype
         
         # 提取該層專屬的 28,672 參數切片，重塑為 (112, 256) 相位映射矩陣
         start_idx = layer_idx * self.params_per_layer
         end_idx = start_idx + self.params_per_layer
         w_layer = self.weight[start_idx:end_idx].view(112, 256)
         
-        # 截取輸入特徵前 112 個通道進行低秩特徵投影 (不引入任何額外的可訓練參數)
-        # 使用 torch.autocast(enabled=False) 強制於 float32 模式執行，避免 bfloat16 與 FFT 衝突
+        # 強制以 float32 進行穩定投影與 Sinc 卷積核構造，避免 bfloat16 與特殊函數衝突
         with torch.autocast(device_type="cuda", enabled=False):
             x_slice = x[..., :112].to(torch.float32)
             w_layer_cast = w_layer.to(torch.float32)
@@ -105,25 +106,42 @@ class FFTPhaseLockRoPE(nn.Module):
             # 矩陣相乘投射至 256 維度的調製特徵
             h = torch.matmul(x_slice, w_layer_cast) # shape: (B, L, 256)
             
-            # 進行 1D 實數 FFT 沿著序列維度 (L) 提取頻域相位
-            h_fft = torch.fft.rfft(h, dim=1) # shape: (B, L//2 + 1, 256) complex
+            # 構造通道獨立 (Depthwise) 的 Causal Sinc 卷積核
+            t = torch.arange(self.W, device=device, dtype=torch.float32) # [W]
+            t_0 = (self.W - 1) / 2.0
             
-            # 提取頻域相位
-            phase = torch.angle(h_fft) # shape: (B, L//2 + 1, 256)
+            # 通道獨立的截止頻率 fc, 在 [0.02, 0.48] 之間均勻分布 (靜態常數，不引入額外參數)
+            fc = torch.linspace(0.02, 0.48, steps=256, device=device, dtype=torch.float32)
             
-            # 相位鎖定與調製：基於頻域相位重新偏置頻譜特徵
-            h_modulated_fft = torch.polar(torch.abs(h_fft), phase)
+            # Sinc 濾波器公式: 2 * fc * sinc(2 * fc * (t - t_0))
+            args = 2.0 * fc.unsqueeze(1) * (t.unsqueeze(0) - t_0)
+            sinc_val = torch.sinc(args) # [256, W]
             
-            # 執行逆實數傅立葉變換 (iFFT) 回到時域
-            h_modulated = torch.fft.irfft(h_modulated_fft, n=L, dim=1) # shape: (B, L, 256)
+            # Hamming 窗
+            window = 0.54 - 0.46 * torch.cos(2.0 * math.pi * t / (self.W - 1))
+            window = window.unsqueeze(0) # [1, W]
+            
+            # 理想 Sinc 卷積核
+            kernel = 2.0 * fc.unsqueeze(1) * sinc_val * window # [256, W]
+            # 能量 L1 歸一化，維持訓練及梯度極限穩定
+            kernel = kernel / (kernel.norm(p=1, dim=1, keepdim=True) + 1e-8)
+            
+            # 重塑為 Depthwise Conv1d 的濾波器權重格式: [256, 1, W]
+            weight_conv = kernel.unsqueeze(1)
+            
+            # 執行 Causal Depthwise Conv1d (左側補零 W-1 以保證因果性)
+            h_t = h.transpose(1, 2) # [B, 256, L]
+            h_padded = F.pad(h_t, (self.W - 1, 0)) # [B, 256, L + W - 1]
+            
+            # 執行卷積互相關
+            h_modulated = F.conv1d(h_padded, weight_conv, groups=256) # [B, 256, L]
+            h_modulated = h_modulated.transpose(1, 2) # [B, L, 256]
             
             # 重塑與擴展至 RoPE 角度修正形狀 (B, L, num_heads, head_dim // 2) -> (B, L, 4, 128)
-            # 所需總元素為 512 個，將時域調製信號沿特徵維度拼接擴展 1 倍
             h_expanded = torch.cat([h_modulated, h_modulated], dim=-1) # shape: (B, L, 512)
             h_reshaped = h_expanded.view(B, L, self.num_heads, self.head_dim // 2)
-        
-        # 回傳動態相位偏移量 delta_theta
-        return h_reshaped.to(x.dtype)
+            
+        return h_reshaped.to(dtype)
 
 # ==========================================
 # [ 相位鎖定 Rotary Position Embedding ]
@@ -360,7 +378,7 @@ class CPTDataCollator:
 # [ 核心引擎 ]
 # ==========================================
 def main():
-    print("\n🚀 啟動 GEMMA3 CPT 訓練矩陣 (FFT 相位鎖定微調 1K 版本，GEMM 全凍結)...")
+    print("\n🚀 啟動 GEMMA3 CPT 訓練矩陣 (1D Conv + Sinc Causal 1K 版本，GEMM 全凍結)...")
     
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
@@ -384,9 +402,9 @@ def main():
     print("\n🔄 正在掛載原生 google/gemma-3-1b-it 權重...")
     base = transplant_and_freeze(MODEL_ID, base)
     
-    # 實例化物理隔離的 FFT 相位鎖定調製模組
-    print(f"\n🔮 正在初始化物理隔離之 FFT 相位鎖定模組 (總參數量精準等於 745,472)...")
-    fft_phase_lock = FFTPhaseLockRoPE(num_layers=26, num_heads=4, head_dim=256, target_params=745472)
+    # 實例化物理隔離的 Sinc Causal 調製模組
+    print(f"\n🔮 正在初始化物理隔離之 Sinc Causal 調製模組 (總參數量精準等於 745,472)...")
+    fft_phase_lock = SincCausalRoPE(num_layers=26, num_heads=4, head_dim=256, target_params=745472)
     
     # 動態修補 (Monkey Patch) 所有 Block 的 forward 以引入 FFT 相位鎖定調製
     print("🛠️ 正在動態修補模型解碼塊 (Gemma3DecoderLayer)，接合相位鎖定 RoPE 邏輯...")
@@ -416,7 +434,7 @@ def main():
     frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     print(f"✅ 設定完成！")
     print(f"🔒 凍結參數總量: {frozen_params:,}")
-    print(f"🟢 可訓練參數總量 (FFT Phase Lock): {trainable_params:,} (預期應精準等於 745,472)")
+    print(f"🟢 可訓練參數總量 (Sinc Causal): {trainable_params:,} (預期應精準等於 745,472)")
     
     if trainable_params != 745472:
         print(f"⚠️ [警告] 可訓練參數量 ({trainable_params:,}) 不等於預期的對照基準 (745,472)，請重新檢查架構！")
