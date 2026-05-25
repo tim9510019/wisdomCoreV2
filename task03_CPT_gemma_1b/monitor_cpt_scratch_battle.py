@@ -19,6 +19,7 @@ MODELS = {
     "HeadDual (頭級解耦)": "~/agigemma3_scratch_1k_headdual_log.csv",
     "LoRA+HeadDual (混合)": "~/agigemma3_scratch_1k_loraheaddual_log.csv",
     "gateHeadDual (門控解耦)": "~/agigemma3_scratch_1k_gateheaddual_log.csv",
+    "DNA_GateDual (雙螺旋門控)": "~/agigemma3_scratch_1k_dnagatedual_log.csv",
 }
 
 def parse_log(rel_path):
@@ -107,7 +108,7 @@ def main():
     run_slurm_eval_and_wait()
 
     # 2. 解析訓練日誌
-    print("\n📈 正在彙整 9 路從頭訓練最新戰況...")
+    print("\n📈 正在彙整 11 路從頭訓練最新戰況...")
     records = []
     for name, path in MODELS.items():
         res = parse_log(path)
@@ -140,10 +141,10 @@ def main():
             
     # 建立 markdown 彙報
     md = []
-    md.append("# 📈 10路 From-Scratch 終極對決——實時監控與多維度技能戰報\n")
+    md.append("# 📈 11路 From-Scratch 終極對決——實時監控與多維度技能戰報\n")
     md.append(f"*最後更新時間: {time.ctime()}*\n")
     
-    md.append("## 🧬 1. 10路五維技能決戰大師榜 (Master Skill Board)\n")
+    md.append("## 🧬 1. 11路五維技能決戰大師榜 (Master Skill Board)\n")
     md.append("| 模型架構 (Model Architecture) | 最新/評估步數 (Step) | 最佳 Eval Loss | D1: Attn Entropy ↓ | D2: Repr Isotropy ↑ | D3: Extrap @256 ↑ | D4: Rob (L4) ↑ | D5: Periodic PCI ↑ | 訓練速度 (Step/s) |")
     md.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
     
@@ -159,6 +160,7 @@ def main():
         "HeadDual (頭級解耦)": "HeadDual",
         "LoRA+HeadDual (混合)": "LoRA+HeadDual",
         "gateHeadDual (門控解耦)": "gateHeadDual",
+        "DNA_GateDual (雙螺旋門控)": "DNA_GateDual",
     }
     
     for r in records:
@@ -206,9 +208,11 @@ def main():
     # 提取 Duality 與 LoRA+Duality 的現狀
     dual_rec = [r for r in records if "Duality (波粒二象)" in r["Model"]][0]
     lora_dual_rec = [r for r in records if "LoRA+Duality (混合)" in r["Model"]][0]
+    dna_rec = [r for r in records if "DNA_GateDual (雙螺旋門控)" in r["Model"]][0]
     
     md.append(f"- **🚀 Duality 協同躍遷**：Duality 訓練步數已達 **{dual_rec['Last Step']}**，最佳損失收斂至 **{dual_rec['Best Eval Loss']}**！各向同性與週期特徵捕獲在評估中穩居全場前二。")
     md.append(f"- **💉 LoRA+Duality 混合首發**：當前訓練步數達 **{lora_dual_rec['Last Step']}**，正在全速釋放參數對半切的混合物理增益！")
+    md.append(f"- **🧬 DNA_GateDual 雙螺旋門控**：最新訓練步數已達 **{dna_rec['Last Step']}**，最佳損失收斂至 **{dna_rec['Best Eval Loss']}**！以雙向鹼基互補糾纏機制，深度解耦高維粒子與波形子空間特徵流。")
     
     # 寫入 Artifact 檔案
     os.makedirs(os.path.dirname(OUT_REPORT), exist_ok=True)

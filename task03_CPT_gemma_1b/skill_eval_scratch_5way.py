@@ -120,8 +120,18 @@ def build_model(arch: str, ckpt_path: str):
                 make_gated_head_decoupled_decoder_forward(idx, fft), block)
         model = AGIV2GForCausalLMT(base, use_gc=False)
         model.fft_phase_lock = fft
+    elif arch == "dnagatedual":
+        from trainCPTAC_AGI_GEMMA3_1K_dnagatedual_scratch import (
+            DNAGatedSincCausalRoPE, make_dna_gated_decoupled_decoder_forward)
+        fft = DNAGatedSincCausalRoPE(num_layers=26, target_params=745472)
+        for idx, block in enumerate(base.blocks):
+            block.forward = types.MethodType(
+                make_dna_gated_decoupled_decoder_forward(idx, fft), block)
+        model = AGIV2GForCausalLMT(base, use_gc=False)
+        model.fft_phase_lock = fft
     else:
         raise ValueError(f"未知架構: {arch}")
+
 
     print(f"  📂 載入 checkpoint: {ckpt_path}")
     sd = torch.load(ckpt_path, map_location="cpu")
@@ -298,6 +308,8 @@ MODELS = [
                                    "~/agigemma3_scratch_checkpoints_1K_loraheaddual/best_cpt_model.pth"),
     ("gateHeadDual", "gateheaddual","~/agigemma3_scratch_1k_gateheaddual_log.csv",
                                    "~/agigemma3_scratch_checkpoints_1K_gateheaddual/best_cpt_model.pth"),
+    ("DNA_GateDual", "dnagatedual","~/agigemma3_scratch_1k_dnagatedual_log.csv",
+                                   "~/agigemma3_scratch_checkpoints_1K_dnagatedual/best_cpt_model.pth"),
 ]
 
 def main():
