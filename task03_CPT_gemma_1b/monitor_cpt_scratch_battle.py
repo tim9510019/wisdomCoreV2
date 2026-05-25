@@ -143,15 +143,9 @@ def main():
     md.append("# 📈 10路 From-Scratch 終極對決——實時監控與多維度技能戰報\n")
     md.append(f"*最後更新時間: {time.ctime()}*\n")
     
-    md.append("## 📊 1. 訓練收斂與速度領先榜\n")
-    md.append("| 模型架構 (Model) | 最新步數 (Last Step) | 最佳步數 (Best Step) | 最佳 Eval Loss | 訓練速度 (Step/s) |")
-    md.append("| :--- | :---: | :---: | :---: | :---: |")
-    for r in records:
-        md.append(f"| **{r['Model']}** | {r['Last Step']} | {r['Best Step']} | {r['Best Eval Loss']} | {r['Speed (step/s)']} |")
-        
-    md.append("\n## 🧬 2. 9路多維度核心技能雷達領先榜\n")
-    md.append("| 模型架構 (Model) | **Best Eval Loss** | **D1: Attention Entropy** ↓ | **D2: Representation Isotropy** ↑ | **D3: Extrapolation @256** ↑ | **D4: Distractor Robustness** ↑ | **D5: Periodic Motif PCI** ↑ |")
-    md.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
+    md.append("## 🧬 1. 10路五維技能決戰大師榜 (Master Skill Board)\n")
+    md.append("| 模型架構 (Model Architecture) | 最新/評估步數 (Step) | 最佳 Eval Loss | D1: Attn Entropy ↓ | D2: Repr Isotropy ↑ | D3: Extrap @256 ↑ | D4: Rob (L4) ↑ | D5: Periodic PCI ↑ | 訓練速度 (Step/s) |")
+    md.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
     
     # 對齊 eval labels 到 MODELS 中
     label_map = {
@@ -169,8 +163,16 @@ def main():
     
     for r in records:
         label = label_map[r["Model"]]
+        speed_str = r["Speed (step/s)"]
+        
         if label in eval_results:
             e = eval_results[label]
+            step_str = str(e.get("latest_step", r["Last Step"]))
+            loss_str = f"{e['best_eval_loss']:.4f}"
+            
+            d1_str = f"{e['attn_entropy']:.4f}" if "attn_entropy" in e else "--"
+            d2_str = f"{e['isotropy']:.4f}" if "isotropy" in e else "--"
+            
             d3_val = e["extrapolation"].get("256", e["extrapolation"].get(256, "--"))
             d3_str = f"{d3_val:.4f}" if isinstance(d3_val, (int, float)) else str(d3_val)
             
@@ -178,13 +180,15 @@ def main():
             d4_str = f"{d4_val:.4f}" if isinstance(d4_val, (int, float)) else str(d4_val)
             
             pci_val = e["periodic_capture"].get("PCI", "--")
-            pci_str = f"{pci_val:.4f}" if isinstance(pci_val, (int, float)) else str(pci_val)
-            
-            md.append(f"| **{r['Model']}** | {e['best_eval_loss']:.4f} | {e['attn_entropy']:.4f} | {e['isotropy']:.4f} | {d3_str} | {d4_str} | {pci_str} |")
+            d5_str = f"{pci_val:.4f}" if isinstance(pci_val, (int, float)) else str(pci_val)
         else:
-            md.append(f"| **{r['Model']}** | {r['Best Eval Loss']} | -- | -- | -- | -- | -- |")
+            step_str = f"{r['Last Step']} (Train)"
+            loss_str = r["Best Eval Loss"]
+            d1_str = d2_str = d3_str = d4_str = d5_str = "--"
             
-    md.append("\n## 🎯 3. 決戰維度解碼與進展分析\n")
+        md.append(f"| **{r['Model']}** | {step_str} | {loss_str} | {d1_str} | {d2_str} | {d3_str} | {d4_str} | {d5_str} | {speed_str} |")
+            
+    md.append("\n## 🎯 2. 決戰維度解碼與進展分析\n")
     
     # 提取當前最快與最優模型
     best_loss_val = float('inf')
