@@ -176,10 +176,14 @@ class GEMMA3(nn.Module):
         self.fc_out = nn.Linear(D, vocab_size, bias=False)
 
     def compute_gate_neg_entropy(self):
-        if not hasattr(self, "gated_module") or not hasattr(self.gated_module, "_gates_by_layer"):
+        if not hasattr(self, "gated_module_list") or not self.gated_module_list:
             return torch.tensor(0.0, device=next(self.parameters()).device)
         
-        gates = self.gated_module._gates_by_layer
+        gated_module = self.gated_module_list[0]
+        if not hasattr(gated_module, "_gates_by_layer"):
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        
+        gates = gated_module._gates_by_layer
         if not gates:
             return torch.tensor(0.0, device=next(self.parameters()).device)
             
@@ -199,8 +203,9 @@ class GEMMA3(nn.Module):
         if count == 0:
             return torch.tensor(0.0, device=next(self.parameters()).device)
             
-        self.gated_module._gates_by_layer.clear()
+        gated_module._gates_by_layer.clear()
         return neg_entropy_sum / count
+
 
     def forward(self, x, n_split_index=None):
         out = self.embedding(x)

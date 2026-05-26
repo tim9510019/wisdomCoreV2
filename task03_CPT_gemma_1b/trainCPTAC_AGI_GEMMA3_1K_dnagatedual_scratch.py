@@ -410,7 +410,7 @@ def main():
     
     # 實例化 DNA_GateDual 鹼基對雙向糾纏門控路由器 (params: 745,472)
     gated_module = DNAGatedSincCausalRoPE(num_layers=26, target_params=745472)
-    base.gated_module = gated_module
+    base.gated_module_list = [gated_module]
     
     for idx, block in enumerate(base.blocks):
         block.forward = types.MethodType(make_dna_gated_decoupled_decoder_forward(idx, gated_module), block)
