@@ -332,6 +332,8 @@ class AGIV2GForCausalLM(nn.Module):
         super().__init__()
         self.base_model = base_model
         self.use_gc = use_gc
+        self._keys_to_ignore_on_save = None
+
 
     def forward(self, input_ids, labels=None, **kwargs):
         n_split_index = kwargs.get("n_split_index", None)
@@ -412,6 +414,8 @@ class AGIV2GForCausalLMT(nn.Module):
         self.base_model = base_model
         self.use_gc = use_gc
         self.gate_entropy_lambda = gate_entropy_lambda
+        self._keys_to_ignore_on_save = None
+
 
     def forward(self, input_ids, labels=None, **kwargs):
         n_split_index = kwargs.get("n_split_index", None)
@@ -507,6 +511,8 @@ class AGIV3ForCausalLM(nn.Module):
         self.base_model = base_model
         self.use_gc = use_gc
         self.gate_entropy_lambda = gate_entropy_lambda
+        self._keys_to_ignore_on_save = None
+
 
     def forward(self, input_ids, labels=None, **kwargs):
         n_split_index = kwargs.get("n_split_index", None)
