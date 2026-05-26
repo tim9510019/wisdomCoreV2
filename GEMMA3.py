@@ -175,6 +175,33 @@ class GEMMA3(nn.Module):
         self.final_norm = GemmaRMSNorm(D)
         self.fc_out = nn.Linear(D, vocab_size, bias=False)
 
+    def compute_gate_neg_entropy(self):
+        if not hasattr(self, "gated_module") or not hasattr(self.gated_module, "_gates_by_layer"):
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        
+        gates = self.gated_module._gates_by_layer
+        if not gates:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+            
+        neg_entropy_sum = 0.0
+        count = 0
+        eps = 1e-8
+        
+        for layer_idx, gate in list(gates.items()):
+            # gate shape: (B, L, 8), values in [0, 1]
+            p = torch.stack([gate, 1.0 - gate], dim=0) # shape: (2, B, L, 8)
+            p = p / (p.sum(dim=0, keepdim=True) + eps)
+            
+            entropy = (p * torch.log(p + eps)).sum(dim=0) # shape: (B, L, 8)
+            neg_entropy_sum = neg_entropy_sum + entropy.mean()
+            count += 1
+            
+        if count == 0:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+            
+        self.gated_module._gates_by_layer.clear()
+        return neg_entropy_sum / count
+
     def forward(self, x, n_split_index=None):
         out = self.embedding(x)
         out = out * math.sqrt(self.D)
@@ -185,3 +212,4 @@ class GEMMA3(nn.Module):
         logits = logits / 30.0
         logits = torch.tanh(logits) * 30.0
         return logits
+

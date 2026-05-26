@@ -107,6 +107,8 @@ class DNAGatedSincCausalRoPE(nn.Module):
         self.sinc_per_layer = 152 * 128 # 19,456
         self.gate_per_layer = 1152 * 8 # 9,216
         self.W = W
+        self._gates_by_layer = {}
+
         
     def forward(self, x, layer_idx):
         B, L, D = x.shape
@@ -160,6 +162,9 @@ class DNAGatedSincCausalRoPE(nn.Module):
             
             s = torch.matmul(x_cast, w_gate_cast) # shape: (B, L, 8)
             gate = torch.sigmoid(s) # shape: (B, L, 8)
+            
+            # 儲存每層閘門，供 compute_gate_neg_entropy 提取
+            self._gates_by_layer[layer_idx] = gate
             
         return delta_theta.to(dtype), gate.to(dtype)
 
@@ -405,6 +410,7 @@ def main():
     
     # 實例化 DNA_GateDual 鹼基對雙向糾纏門控路由器 (params: 745,472)
     gated_module = DNAGatedSincCausalRoPE(num_layers=26, target_params=745472)
+    base.gated_module = gated_module
     
     for idx, block in enumerate(base.blocks):
         block.forward = types.MethodType(make_dna_gated_decoupled_decoder_forward(idx, gated_module), block)
