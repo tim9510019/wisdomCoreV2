@@ -10,7 +10,6 @@ import types
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 os.environ["BITSANDBYTES_NOWELCOME"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -107,13 +106,10 @@ class DNAGatedSincCausalRoPE(nn.Module):
         self.sinc_per_layer = 152 * 128 # 19,456
         self.gate_per_layer = 1152 * 8 # 9,216
         self.W = W
-        self._gates_by_layer = {}
-
         
     def forward(self, x, layer_idx):
         B, L, D = x.shape
         device = x.device
-        dtype = x.dtype
         
         # 1. 獲取波動 Sinc 卷積投射權重 (152 x 128)
         sinc_start = layer_idx * self.sinc_per_layer
@@ -163,10 +159,7 @@ class DNAGatedSincCausalRoPE(nn.Module):
             s = torch.matmul(x_cast, w_gate_cast) # shape: (B, L, 8)
             gate = torch.sigmoid(s) # shape: (B, L, 8)
             
-            # 儲存每層閘門，供 compute_gate_neg_entropy 提取
-            self._gates_by_layer[layer_idx] = gate
-            
-        return delta_theta.to(dtype), gate.to(dtype)
+        return delta_theta.to(x.dtype), gate.to(x.dtype)
 
 # =======================================================
 # [ 位置旋轉編碼實現 ]
@@ -255,23 +248,23 @@ def make_dna_gated_decoupled_decoder_forward(layer_idx, gated_module):
         # 🧬 6. 同層雙向鹼基對糾纏交織 (Complementary Subspace Gated Crosstalk)
         # =============================================================
         # 將 Q, K, V 的 256 特徵維度均分為 8 個鹼基子特徵組（每組 32 維）
-        attn_part_grouped = attn_part.view(B, L, 3, 8, 32)
-        attn_wave_grouped = attn_wave.view(B, L, 1, 8, 32)
+        attn_part_grouped = attn_part.reshape(B, L, 3, 8, 32)
+        attn_wave_grouped = attn_wave.reshape(B, L, 1, 8, 32)
         
-        # 粒子門控 g_P = gate (正向轉錄), 互補波動門控 g_W = 1.0 - gate (反向轉錄)
-        gate_p = gate.unsqueeze(2).unsqueeze(-1) # shape: (B, L, 1, 8, 1) 對齊 (B, L, 1/3, 8, 32)
-        gate_w = 1.0 - gate_p
+        # 粒子門控 g_P = 1.0 - gate (反向轉錄), 互補波動門控 g_W = gate (正向轉錄)
+        gate_w = gate.unsqueeze(2).unsqueeze(-1) # shape: (B, L, 1, 8, 1)
+        gate_p = 1.0 - gate_w
         
-        # 進行分組鹼基互補門控縮放
-        Z_w_gated = (attn_wave_grouped * gate_p).view(B, L, 1, 256) # shape: (B, L, 1, 256)
-        Z_p_gated = (attn_part_grouped * gate_w).view(B, L, 3, 256) # shape: (B, L, 3, 256)
+        # 🧬 雙鏈第一性原理糾纏交織：
+        # 粒子鏈與波動鏈進行完整、對稱的互補門控與跨鏈資訊交織，不存在未被閘門控制的旁路！
+        attn_part_gated = attn_part_grouped * gate_p
+        attn_wave_gated = attn_wave_grouped * gate_w
         
-        # 跨鏈糾纏交織：
-        # 1. 波動輸出轉錄至幾何粒子鏈中：將 gated wave 廣播累加至 3 個粒子頭
-        attn_part_entangled = attn_part + Z_w_gated
+        # 1. 波動輸出轉錄至幾何粒子鏈中：將 gated wave 廣播累加至 3 個 gated 粒子頭
+        attn_part_entangled = (attn_part_gated + attn_wave_gated).reshape(B, L, 3, 256)
         
-        # 2. 幾何粒子輸出轉錄至波動鏈中：將 3 個 gated 粒子頭取均值後累加至波動頭
-        attn_wave_entangled = attn_wave + Z_p_gated.mean(dim=2, keepdim=True)
+        # 2. 幾何粒子輸出轉錄至波動鏈中：將 3 個 gated 粒子頭取均值後累加至 gated 波動頭
+        attn_wave_entangled = (attn_wave_gated + attn_part_gated.mean(dim=2, keepdim=True)).reshape(B, L, 1, 256)
         
         # 重組特徵流
         attn_out_entangled = torch.cat([attn_part_entangled, attn_wave_entangled], dim=2)
@@ -283,8 +276,111 @@ def make_dna_gated_decoupled_decoder_forward(layer_idx, gated_module):
         normed_X_ffn = self.pre_feedforward_layernorm(X_res1)
         ffn_out = self.ffn(normed_X_ffn)
         Output = X_res1 + self.post_feedforward_layernorm(ffn_out)
-        return Output
+        
+        # 🧬 8. 計算本層的閘門負熵 (無 side-channel 洩漏)
+        with torch.autocast(device_type="cuda", enabled=False):
+            eps = 1e-8
+            gate_32 = gate.to(torch.float32)
+            p = torch.stack([gate_32, 1.0 - gate_32], dim=0) # shape: (2, B, L, 8)
+            p = p / (p.sum(dim=0, keepdim=True) + eps)
+            block_entropy = (p * torch.log(p + eps)).sum(dim=0).mean() # scalar
+            
+        return Output, block_entropy.to(X.dtype)
     return forward
+
+# ==========================================
+# [ 完美無記憶體洩漏的 CausalLM 包裝器 ]
+# ==========================================
+class DNAGatedAGIV2GForCausalLMT(nn.Module):
+    def __init__(self, base_model, use_gc=True, gate_entropy_lambda=0.01):
+        super().__init__()
+        self.base_model = base_model
+        self.use_gc = use_gc
+        self.gate_entropy_lambda = gate_entropy_lambda
+        self._keys_to_ignore_on_save = None
+        self._last_ce_loss = 0.0
+        self._last_gate_entropy_loss = 0.0
+
+    def forward(self, input_ids, labels=None, **kwargs):
+        n_split_index = kwargs.get("n_split_index", None)
+
+        hidden_states = self.base_model.embedding(input_ids)
+        hidden_states = hidden_states * math.sqrt(self.base_model.D)
+
+        gate_entropies = []
+        import torch.utils.checkpoint as checkpoint
+        
+        for i, block in enumerate(self.base_model.blocks):
+            shift_size = (block.C // 2) if (i % 2 != 0) else 0
+            if self.training and self.use_gc:
+                hidden_states, block_entropy = checkpoint.checkpoint(
+                    block,
+                    hidden_states,
+                    shift_size,
+                    use_reentrant=False,
+                    n_split_index=n_split_index,
+                )
+            else:
+                hidden_states, block_entropy = block(
+                    hidden_states, shift_size=shift_size, n_split_index=n_split_index
+                )
+            gate_entropies.append(block_entropy)
+
+        hidden_states = self.base_model.final_norm(hidden_states)
+
+        loss = None
+        logits = None
+
+        if labels is not None:
+            shift_hidden = hidden_states[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            loss_fct = nn.CrossEntropyLoss(reduction="sum", ignore_index=-100)
+            total_loss = 0.0
+            valid_tokens = 0.0
+            chunk_size = 2048
+            seq_len = shift_hidden.size(1)
+
+            for i in range(0, seq_len, chunk_size):
+                end_idx = min(i + chunk_size, seq_len)
+                c_hidden = shift_hidden[:, i:end_idx, :]
+                c_logits = self.base_model.fc_out(c_hidden)
+                c_labels = shift_labels[:, i:end_idx]
+
+                c_loss = loss_fct(
+                    c_logits.reshape(-1, c_logits.size(-1)).float(),
+                    c_labels.reshape(-1),
+                )
+                total_loss += c_loss
+
+                valid_tokens += (c_labels != -100).sum().item()
+                del c_logits, c_hidden
+
+            loss = total_loss / max(valid_tokens, 1)
+
+            if self.training:
+                # 🌟 第一性原理自適應負熵正則，完全排除 memory leak 旁路
+                if len(gate_entropies) > 0:
+                    gate_neg_entropy = torch.stack(gate_entropies).mean()
+                    gate_entropy_loss = gate_neg_entropy + math.log(3.0)
+
+                    self._last_ce_loss = loss.detach().item()
+                    self._last_gate_entropy_loss = gate_entropy_loss.detach().item()
+
+                    # 總 loss = CE loss + λ * 負熵懲罰
+                    loss = loss + self.gate_entropy_lambda * gate_entropy_loss
+                else:
+                    self._last_ce_loss = loss.detach().item()
+                    self._last_gate_entropy_loss = 0.0
+            else:
+                self._last_ce_loss = loss.detach().item()
+                self._last_gate_entropy_loss = 0.0
+        else:
+            logits = self.base_model.fc_out(hidden_states)
+
+        return (
+            {"loss": loss, "logits": logits} if logits is not None else {"loss": loss}
+        )
 
 # ==========================================
 # [ 訓練回調與監控模組 ]
@@ -410,13 +506,28 @@ def main():
     
     # 實例化 DNA_GateDual 鹼基對雙向糾纏門控路由器 (params: 745,472)
     gated_module = DNAGatedSincCausalRoPE(num_layers=26, target_params=745472)
-    base.gated_module_list = [gated_module]
+    base.gated_module_list = nn.ModuleList([gated_module])
     
     for idx, block in enumerate(base.blocks):
         block.forward = types.MethodType(make_dna_gated_decoupled_decoder_forward(idx, gated_module), block)
         
-    model = AGIV2GForCausalLMT(base, use_gc=True, gate_entropy_lambda=GATE_ENTROPY_LAMBDA)
-    model.fft_phase_lock = gated_module
+    # 🚀 動態修補 base.forward 以適應 tuple 輸出
+    def new_base_forward(self, x, n_split_index=None):
+        out = self.embedding(x)
+        out = out * math.sqrt(self.D)
+        for i, block in enumerate(self.blocks):
+            out, _ = block(out, shift_size=0, n_split_index=n_split_index)
+        out = self.final_norm(out)
+        logits = self.fc_out(out)
+        logits = logits / 30.0
+        logits = torch.tanh(logits) * 30.0
+        return logits
+
+    base.forward = types.MethodType(new_base_forward, base)
+
+    # 🚀 使用完美的無 side-channel 洩漏 CausalLM 封裝器
+    model = DNAGatedAGIV2GForCausalLMT(base, use_gc=True, gate_entropy_lambda=GATE_ENTROPY_LAMBDA)
+    # model.fft_phase_lock = gated_module (已移除以防止 Safetensors 記憶體共用錯誤)
     
     # FROM SCRATCH: 開放全局所有參數進行從頭訓練
     for param in model.parameters():
