@@ -245,32 +245,25 @@ def make_dna_gated_decoupled_decoder_forward(layer_idx, gated_module):
         attn_wave = attn_out[:, :, 3:] # shape: (B, L, 1, 256)
         
         # =============================================================
-        # 🧬 6. 同層雙向鹼基對糾纏交織 (Complementary Subspace Gated Crosstalk)
+        # 🧬 6. 同層雙螺旋正交子空間路由 (Complementary Subspace Gated Routing - v2)
         # =============================================================
-        # 將 Q, K, V 的 256 特徵維度均分為 8 個鹼基子特徵組（每組 32 維）
+        # 將 Q, K, V 的 256 特徵維度均分為 8 個子空間組（每組 32 維）
         attn_part_grouped = attn_part.reshape(B, L, 3, 8, 32)
         attn_wave_grouped = attn_wave.reshape(B, L, 1, 8, 32)
         
-        # 粒子門控 g_P = 1.0 - gate (反向轉錄), 互補波動門控 g_W = gate (正向轉錄)
+        # 粒子門控 g_P = 1.0 - gate, 互補波動門控 g_W = gate
         gate_w = gate.unsqueeze(2).unsqueeze(-1) # shape: (B, L, 1, 8, 1)
         gate_p = 1.0 - gate_w
         
-        # 🧬 雙鏈第一性原理糾纏交織：
-        # 粒子鏈與波動鏈進行完整、對稱的互補門控與跨鏈資訊交織，不存在未被閘門控制的旁路！
-        attn_part_gated = attn_part_grouped * gate_p
-        attn_wave_gated = attn_wave_grouped * gate_w
+        # 🧬 雙鏈第一性原理互補正交路由：兩鏈各佔互補子空間，不進行跨鏈加性混合以防表徵抹平！
+        attn_part_gated = (attn_part_grouped * gate_p).reshape(B, L, 3, 256)
+        attn_wave_gated = (attn_wave_grouped * gate_w).reshape(B, L, 1, 256)
         
-        # 1. 波動輸出轉錄至幾何粒子鏈中：將 gated wave 廣播累加至 3 個 gated 粒子頭
-        attn_part_entangled = (attn_part_gated + attn_wave_gated).reshape(B, L, 3, 256)
-        
-        # 2. 幾何粒子輸出轉錄至波動鏈中：將 3 個 gated 粒子頭取均值後累加至 gated 波動頭
-        attn_wave_entangled = (attn_wave_gated + attn_part_gated.mean(dim=2, keepdim=True)).reshape(B, L, 1, 256)
-        
-        # 重組特徵流
-        attn_out_entangled = torch.cat([attn_part_entangled, attn_wave_entangled], dim=2)
+        # 重組正交特徵流
+        attn_out_gated = torch.cat([attn_part_gated, attn_wave_gated], dim=2)
         
         # 7. 重組投影
-        Z_hat = self.o_proj_loc(attn_out_entangled.reshape(B, L, self.num_heads * self.head_dim))
+        Z_hat = self.o_proj_loc(attn_out_gated.reshape(B, L, self.num_heads * self.head_dim))
         
         X_res1 = X + self.post_attention_layernorm(Z_hat)
         normed_X_ffn = self.pre_feedforward_layernorm(X_res1)

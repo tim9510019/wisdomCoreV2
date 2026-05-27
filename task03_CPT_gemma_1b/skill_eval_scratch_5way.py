@@ -161,7 +161,8 @@ def eval_attention_entropy(model, batch):
             w = torch.nan_to_num(w, nan=0.0)
             H = -(w * torch.log(w + 1e-12)).sum(-1).mean().item()
             entropies.append(H)
-            X = block(X)
+            out_res = block(X)
+            X = out_res[0] if isinstance(out_res, tuple) else out_res
     return float(np.mean(entropies))
 
 # ──────────────────────────────────────────
@@ -172,7 +173,8 @@ def eval_isotropy(model, batch):
         bm = model.base_model
         X = bm.embedding(batch)
         for block in bm.blocks:
-            X = block(X)
+            out_res = block(X)
+            X = out_res[0] if isinstance(out_res, tuple) else out_res
         feat = X.view(-1, X.size(-1)).float()
         feat = feat - feat.mean(0, keepdim=True)
         U, S, V = torch.linalg.svd(feat, full_matrices=False)
@@ -255,7 +257,8 @@ def eval_periodic_capture(model, seq_len=CHUNK, period=8):
             bm = model.base_model
             X = bm.embedding(inputs)
             for block in bm.blocks:
-                X = block(X)
+                out_res = block(X)
+                X = out_res[0] if isinstance(out_res, tuple) else out_res
             feat = X[0].float().cpu().numpy()
             fft_amp = np.abs(np.fft.rfft(feat, axis=0))
             p = fft_amp / (fft_amp.sum(0, keepdims=True) + 1e-12)
