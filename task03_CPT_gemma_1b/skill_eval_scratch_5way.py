@@ -129,6 +129,48 @@ def build_model(arch: str, ckpt_path: str):
                 make_dna_gated_decoupled_decoder_forward(idx, fft), block)
         model = AGIV2GForCausalLMT(base, use_gc=False)
         model.fft_phase_lock = fft
+    elif arch == "dnaentangled":
+        from trainCPTAC_AGI_GEMMA3_1K_dnaentangled_scratch import (
+            DNAGatedSincCausalRoPE, make_dna_entangled_decoupled_decoder_forward)
+        fft = DNAGatedSincCausalRoPE(num_layers=26, target_params=745472)
+        for idx, block in enumerate(base.blocks):
+            block.forward = types.MethodType(
+                make_dna_entangled_decoupled_decoder_forward(idx, fft), block)
+        model = AGIV2GForCausalLMT(base, use_gc=False)
+        model.fft_phase_lock = fft
+    elif arch == "dnagatedual_ablation":
+        from trainCPTAC_AGI_GEMMA3_1K_dnagatedual_ablation_scratch import (
+            DNAGatedSincCausalRoPE, make_dna_gated_decoupled_decoder_forward)
+        fft = DNAGatedSincCausalRoPE(num_layers=26, target_params=745472)
+        for idx, block in enumerate(base.blocks):
+            block.forward = types.MethodType(
+                make_dna_gated_decoupled_decoder_forward(idx, fft), block)
+        model = AGIV2GForCausalLMT(base, use_gc=False)
+        model.fft_phase_lock = fft
+    elif arch == "dnaentangled_extrap":
+        from trainCPTAC_AGI_GEMMA3_1K_dnaentangled_extrap_finetune import (
+            DNAGatedSincCausalRoPE, make_dna_entangled_decoupled_decoder_forward)
+        fft = DNAGatedSincCausalRoPE(num_layers=26, target_params=745472)
+        for idx, block in enumerate(base.blocks):
+            block.forward = types.MethodType(
+                make_dna_entangled_decoupled_decoder_forward(idx, fft), block)
+        model = AGIV2GForCausalLMT(base, use_gc=False)
+        model.fft_phase_lock = fft
+    elif arch == "dnahelix_ultimate":
+        from trainCPTAC_AGI_GEMMA3_1K_dnahelix_ultimate_scratch import (
+            DNAGatedSincCausalRoPE, make_dna_entangled_decoupled_decoder_forward, LoRALinear)
+        # Apply Rank-4 LoRA wrapper on W_q_loc and W_v_loc
+        for block in base.blocks:
+            block.W_q_loc = LoRALinear(block.W_q_loc, r=4, alpha=8)
+            block.W_v_loc = LoRALinear(block.W_v_loc, r=4, alpha=8)
+        # Instantiate gated module (372,736 parameters)
+        fft = DNAGatedSincCausalRoPE(num_layers=26, target_params=372736)
+        # Patch the forward methods
+        for idx, block in enumerate(base.blocks):
+            block.forward = types.MethodType(
+                make_dna_entangled_decoupled_decoder_forward(idx, fft), block)
+        model = AGIV2GForCausalLMT(base, use_gc=False)
+        model.fft_phase_lock = fft
     else:
         raise ValueError(f"未知架構: {arch}")
 
@@ -313,6 +355,14 @@ MODELS = [
                                    "~/agigemma3_scratch_checkpoints_1K_gateheaddual/best_cpt_model.pth"),
     ("DNA_GateDual", "dnagatedual","~/agigemma3_scratch_1k_dnagatedual_log.csv",
                                    "~/agigemma3_scratch_checkpoints_1K_dnagatedual/best_cpt_model.pth"),
+    ("DNA_Entangled","dnaentangled","~/agigemma3_scratch_1k_dnaentangled_log.csv",
+                                   "~/agigemma3_scratch_checkpoints_1K_dnaentangled/best_cpt_model.pth"),
+    ("DNA_GateDual_Ablation", "dnagatedual_ablation", "~/agigemma3_scratch_1k_dnagatedual_ablation_log.csv",
+                                   "~/agigemma3_scratch_checkpoints_1K_dnagatedual_ablation/best_cpt_model.pth"),
+    ("DNA_Entangled_Extrap", "dnaentangled_extrap", "~/agigemma3_scratch_1k_dnaentangled_extrap_log.csv",
+                                   "~/agigemma3_scratch_checkpoints_1K_dnaentangled_extrap/best_cpt_model.pth"),
+    ("DNA_Helix_Ultimate", "dnahelix_ultimate", "~/agigemma3_scratch_1k_dnahelix_ultimate_log.csv",
+                                   "~/agigemma3_scratch_checkpoints_1K_dnahelix_ultimate/best_cpt_model.pth"),
 ]
 
 def main():
