@@ -257,28 +257,94 @@ def eval_length_extrapolation(model, lengths=[128, 256, 512, 1024]):
     return results
 
 # ──────────────────────────────────────────
-# Dim 4: 干擾魯棒性
+# Dim 4: 干擾魯棒性 (紅隊改良版：多層/語義/真實語料/避開Sink/大窗口)
 # ──────────────────────────────────────────
-def eval_distractor_robustness(model, base_len=128, num_distractors=[0,1,2,4]):
+def eval_distractor_robustness(model, base_len=128, num_distractors=[0, 2, 4, 6]):
+    # 真實語料干擾（來自 Gemma Tokenizer 的實際編碼，具備真實語法語義）
+    # TEXT_IDS: 語言自然語意
+    TEXT_IDS = [818, 92474, 563, 496, 5268, 4735, 2028, 13217, 8314, 528, 236743, 236778, 236771, 236770, 236832, 236764, 44055, 580, 10616, 5074, 236772, 2834, 5700, 15106, 236761, 13806, 2455, 5192, 4681, 16438, 607, 74944, 84810, 1056, 8487, 8573, 1440, 4403, 11665, 236764, 618, 49106, 23974, 607, 3756, 33413, 740, 32659, 5700, 699, 506, 5396, 2307, 10797, 236761]
+    # CODE_IDS: 代碼語意
+    CODE_IDS = [2063, 14820, 236779, 2305, 236769, 2762, 236764, 2708, 236764, 1494, 236764, 1123, 1473, 107, 140, 584, 1494, 6867, 2708, 236787, 107, 144, 6848, 578, 568, 11480, 900, 2708, 236768, 973, 236743, 236778, 107, 144, 584, 4617, 236840, 6848, 236842, 1251, 1123, 236787, 107, 148, 2060]
+    
+    # 組合出真實背景干擾庫
+    bg_pool = TEXT_IDS + CODE_IDS
+    # 隨機數種物固定
+    torch.manual_seed(123)
+    np.random.seed(123)
+
+    prefix_tokens = [5000, 5001, 5002, 5003]
+    bm = model.base_model
+    
+    # 【侷限性二：動態計算最相似語意 Token，消除 literal copy-paste】
+    with torch.no_grad():
+        embedding_matrix = bm.embedding.weight.data
+        prefix_embs = embedding_matrix[prefix_tokens] # (4, D)
+        # 歸一化
+        norm_embs = prefix_embs / (torch.norm(prefix_embs, dim=-1, keepdim=True) + 1e-8)
+        norm_all = embedding_matrix / (torch.norm(embedding_matrix, dim=-1, keepdim=True) + 1e-8)
+        # 計算相似度
+        similarities = torch.matmul(norm_all, norm_embs.T) # (VocabSize, 4)
+        
+        suffix_tokens = []
+        for idx, p in enumerate(prefix_tokens):
+            similarities[p, idx] = -1.0 # 排除自身
+            for other_p in prefix_tokens:
+                similarities[other_p, idx] = -1.0
+            # 取得與之最相似的 token
+            suffix_tokens.append(torch.argmax(similarities[:, idx]).item())
+            
     scores = {}
+    
+    # 評估多個代表層以消除單層偏差
+    # 淺中深三層：6, 13, 20 (總共26層)
+    eval_layers = [6, 13, 20]
+    
     for nd in num_distractors:
-        total = min(base_len + nd * 64, CHUNK)
-        torch.manual_seed(123)
-        inp = torch.randint(0, 262144, (1, total)).to(DEVICE)
-        inp[0, :4] = torch.tensor([5000,5001,5002,5003], device=DEVICE)
-        inp[0, -4:] = torch.tensor([5000,5001,5002,5003], device=DEVICE)
+        total = base_len + nd * 64 # 長度從 128 延伸至 512
+        
+        # 構造輸入
+        # 1. 填充背景干擾 (重複 bg_pool)
+        repeated_bg = bg_pool * ((total // len(bg_pool)) + 2)
+        inp_list = repeated_bg[:total]
+        
+        # 轉成 tensor
+        inp = torch.tensor(inp_list, dtype=torch.long, device=DEVICE).unsqueeze(0)
+        
+        # 2. 【侷限性五：避開 Attention Sink】放置關鍵 Prefix 於 index 16:20
+        prefix_start = 16
+        prefix_end = 20
+        inp[0, prefix_start:prefix_end] = torch.tensor(prefix_tokens, device=DEVICE)
+        
+        # 3. 放置 Suffix 於結尾 (非完全一致，為 model 語意空間中的近義詞)
+        inp[0, -4:] = torch.tensor(suffix_tokens, device=DEVICE)
+        
+        layer_scores = []
         with torch.no_grad():
-            bm = model.base_model
             X = bm.embedding(inp)
-            mid = bm.blocks[13]
-            normed_X = mid.input_layernorm(X)
-            Q = mid.W_q_loc(normed_X).view(1, total, mid.num_heads, mid.head_dim)
-            K = mid.W_k_loc(normed_X).view(1, total, mid.num_kv_heads, mid.head_dim)
-            Q = mid.q_norm(Q).transpose(1,2).float()
-            K = mid.k_norm(K).transpose(1,2).float()
-            sc = torch.matmul(Q, K.transpose(-2,-1)) / math.sqrt(mid.head_dim)
-            w = torch.softmax(sc, dim=-1).mean(1)
-            scores[nd] = float(w[0, -4:, :4].sum().item())
+            for idx, block in enumerate(bm.blocks):
+                # 如果是評估層，截取其注意力矩陣
+                if idx in eval_layers:
+                    normed_X = block.input_layernorm(X)
+                    Q = block.W_q_loc(normed_X).view(1, total, block.num_heads, block.head_dim)
+                    K = block.W_k_loc(normed_X).view(1, total, block.num_kv_heads, block.head_dim)
+                    Q = block.q_norm(Q).transpose(1, 2).float()
+                    K = block.k_norm(K).transpose(1, 2).float()
+                    
+                    # 計算注意力分數
+                    scores_mat = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(block.head_dim)
+                    w = torch.softmax(scores_mat, dim=-1).mean(1) # 平均各 head (1, total, total)
+                    
+                    # 計算 suffix (-4:) 對 prefix (16:20) 的注意力聚集度
+                    attn_val = w[0, -4:, prefix_start:prefix_end].sum().item()
+                    layer_scores.append(attn_val)
+                    
+                # 正常前向傳播傳給下一層
+                out_res = block(X)
+                X = out_res[0] if isinstance(out_res, tuple) else out_res
+                
+        # 記錄該干擾程度下的多層平均防禦得分
+        scores[nd] = float(np.mean(layer_scores))
+        
     return scores
 
 # ──────────────────────────────────────────
