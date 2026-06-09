@@ -78,6 +78,17 @@ def generate_mp4_video(filename, width=224, height=224, num_frames=32, fps=24):
         
     container.close()
 
+def generate_mock_eiffel_tower(filename):
+    print("Drawing a mock Eiffel Tower using PIL as fallback...")
+    img = Image.new("RGB", (320, 320), color=(135, 206, 235)) # Sky blue background
+    draw = ImageDraw.Draw(img)
+    # Draw Eiffel Tower shape
+    draw.polygon([(80, 300), (120, 220), (200, 220), (240, 300)], fill=(80, 80, 80)) # Base
+    draw.polygon([(120, 220), (140, 120), (180, 120), (200, 220)], fill=(100, 100, 100)) # Middle
+    draw.polygon([(140, 120), (150, 40), (170, 40), (180, 120)], fill=(120, 120, 120)) # Top
+    draw.line([(160, 40), (160, 15)], fill=(150, 150, 150), width=3) # Spire
+    img.save(filename)
+
 def main():
     color_print("==========================================================", "bold")
     color_print("🚀 原生 Gemma 4 統一多模態推理與自迴歸生成展示 DEMO", "bold")
@@ -127,8 +138,15 @@ def main():
     
     image_path = os.path.join(current_dir, "eiffel_tower.png")
     if not os.path.exists(image_path):
-        color_print(f"❌ 錯誤：找不到測試圖片 {image_path}", "magenta")
-        sys.exit(1)
+        url = "https://upload.wikimedia.org/wikipedia/commons/thumb/8/85/Tour_Eiffel_Wikimedia_Commons_2.jpg/320px-Tour_Eiffel_Wikimedia_Commons_2.jpg"
+        color_print(f"📷 找不到 {image_path}，嘗試從維基百科下載測試圖片...", "yellow")
+        try:
+            import urllib.request
+            urllib.request.urlretrieve(url, image_path)
+            color_print("✅ 下載成功！", "green")
+        except Exception as e:
+            color_print(f"⚠️ 無法下載圖片 ({e})，改為繪製 Mock 圖片...", "yellow")
+            generate_mock_eiffel_tower(image_path)
         
     color_print(f"📷 正在載入測試影像: {image_path}", "cyan")
     image = Image.open(image_path)
@@ -163,8 +181,14 @@ def main():
     
     audio_path = os.path.join(current_dir, "music.wav")
     if not os.path.exists(audio_path):
-        color_print(f"❌ 錯誤：找不到測試音訊 {audio_path}", "magenta")
-        sys.exit(1)
+        color_print(f"🎵 找不到 {audio_path}，嘗試自動合成測試旋律音訊...", "yellow")
+        try:
+            from generate_music import generate_melody_wav
+            generate_melody_wav(audio_path)
+            color_print("✅ 旋律音訊合成完成！", "green")
+        except Exception as e:
+            color_print(f"❌ 無法合成測試音訊：{e}", "magenta")
+            sys.exit(1)
         
     color_print(f"🎵 正在自硬碟載入音訊檔案: {audio_path}", "cyan")
     waveform, sr = load_wav_mono_normalized(audio_path)
