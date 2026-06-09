@@ -19,3 +19,4 @@
 *.json
 *.wav
 *.mp4
+task05/scripts/*.py
