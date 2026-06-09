@@ -17,3 +17,5 @@
 *.safetensors
 *.pth
 *.json
+*.wav
+*.mp4
