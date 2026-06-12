@@ -1,4 +1,4 @@
-"""Splice the current `agent/my_agent.py` into `notebooks/submission.ipynb`.
+"""Splice the current `agent/my_agent_lora.py` into `notebooks/submission.ipynb`.
 
 The notebook follows the exact pattern used by Kaggle's official sample
 ("ARC3 Sample Submission - Stochastic Goose"):
@@ -39,7 +39,7 @@ _ACCELERATORS = {
 }
 
 ROOT = Path(__file__).resolve().parents[1]
-AGENT_SRC = ROOT / "agent" / "my_agent.py"
+AGENT_SRC = ROOT / "agent" / "my_agent_lora.py"
 NOTEBOOK_PATH = ROOT / "notebooks" / "submission.ipynb"
 METADATA_PATH = ROOT / "notebooks" / "kernel-metadata.json"
 
@@ -184,7 +184,7 @@ def build() -> dict:
         "cells": [
             markdown_cell(
                 "# ARC Prize 2026 — ARC-AGI-3 Submission\n\n"
-                "Built from `agent/my_agent.py` via `scripts/build_notebook.py`. "
+                "Built from `agent/my_agent_lora.py` via `scripts/build_notebook.py`. "
                 "Do not edit cells directly — edit the source file and re-run "
                 "`make submit`."
             ),

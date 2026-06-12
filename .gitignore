@@ -20,3 +20,9 @@ reference/
 .DS_Store
 .idea/
 .vscode/
+
+# Local runs, logs, and checkpoints
+benchmark_results/
+bkup/
+nohup.out
+test_masked_checkpoints/

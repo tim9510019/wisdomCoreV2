@@ -50,7 +50,7 @@ setup: ## One-time install: venv, arc-agi, kaggle CLI, clone framework
 	@echo ""
 	@echo "Setup complete. Try:  make play-local"
 
-play-local: ## Run agent/my_agent.py against ALL games (or GAME=ls20 for a single one)
+play-local: ## Run agent/my_agent_lora.py against ALL games (or GAME=ls20 for a single one)
 	$(VENV_PY) scripts/play_local.py $(if $(GAME),--game $(GAME)) --max-steps $(STEPS)
 
 verify-local: ## Quick smoke test: 50 steps on ls20 + vc33 only
@@ -65,7 +65,7 @@ pull-sample: _check-kaggle ## Download the official Stochastic Goose sample note
 	    -p reference/stochastic-goose -m
 	@echo "Open reference/stochastic-goose/*.ipynb for the canonical pattern."
 
-notebook: ## Splice agent/my_agent.py into notebooks/submission.ipynb
+notebook: ## Splice agent/my_agent_lora.py into notebooks/submission.ipynb
 	$(VENV_PY) scripts/build_notebook.py
 
 submit: notebook _check-kaggle ## Build notebook and push to Kaggle (one-line submission)
@@ -83,3 +83,10 @@ status: _check-kaggle ## Show the status of your most recent Kaggle kernel run
 clean: ## Remove generated artefacts (venv, downloaded games, vendored repos)
 	rm -rf $(VENV) vendor environment_files recordings notebooks/submission.ipynb \
 	       reference logs.log __pycache__ .pytest_cache
+
+# ==================================================================
+# 🔬 Benchmark (96GB Blackwell)
+# ==================================================================
+
+benchmark: ## Run Dir1 LoRA on GPU 0
+	bash scripts/run_gpu0.sh

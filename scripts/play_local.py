@@ -1,4 +1,4 @@
-"""Run `agent/my_agent.py` locally against a real ARC-AGI-3 game.
+"""Run `agent/my_agent_lora.py` locally against a real ARC-AGI-3 game.
 
 This is the fast inner-loop: no Docker, no Kaggle round-trip. Uses the
 `arc-agi` PyPI package to host the game engine and the ARC-AGI-3-Agents
@@ -30,16 +30,16 @@ from arc_agi import OperationMode
 
 
 def load_my_agent_class():
-    """Import MyAgent from agent/my_agent.py via importlib."""
+    """Import MyAgent from agent/my_agent_lora.py via importlib."""
     spec = importlib.util.spec_from_file_location(
-        "user_agent_module", ROOT / "agent" / "my_agent.py"
+        "user_agent_module", ROOT / "agent" / "my_agent_lora.py"
     )
     if spec is None or spec.loader is None:
-        raise SystemExit("Could not load agent/my_agent.py")
+        raise SystemExit("Could not load agent/my_agent_lora.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if not hasattr(module, "MyAgent"):
-        raise SystemExit("agent/my_agent.py must define a class named `MyAgent`")
+        raise SystemExit("agent/my_agent_lora.py must define a class named `MyAgent`")
     return module.MyAgent
 
 
