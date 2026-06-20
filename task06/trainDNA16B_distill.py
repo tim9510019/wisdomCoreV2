@@ -5,9 +5,9 @@ trainDNA16B_distill.py — DNA Helix Ultimate 16B 蒸餾訓練主程序
 
   Phase 1 ── 1B  ── 純蒸餾暖身
     ・只餵 Data-Type A（≤1024 tok）
-    ・粒子頭先從 Qwen3-Coder Soft Labels 建立穩定語法幾何基礎
-    ・Gate 為白紙狀態，不做波動頭激活
-    ・Loss：CE + KL（α=1.0），負熵正則極小（β=0.1）
+    ・波動頭與粒子頭在糾纏架構下協同蒸餾，共同學習 Qwen3-Coder Soft Labels
+    ・WPCE 糾纏引擎引導雙鏈交互共振
+    ・Loss：CE + KL（α=1.0）+ 負熵平衡門控分配（β=0.5）
 
   Phase 2 ── 1B  ── 純長文波動共振
     ・只餵 Data-Type B（32K~128K tok）
@@ -90,9 +90,9 @@ PHASE_CONFIGS = {
         "learning_rate":        1e-4,
         "warmup_steps":         500,
         "alpha_distill":        1.0,
-        "beta_wave_long":       0.1,
-        "beta_wave_short":      0.1,
-        "gate_entropy_lambda":  0.001,
+        "beta_wave_long":       0.5,
+        "beta_wave_short":      0.5,
+        "gate_entropy_lambda":  0.01,
         "batch_mix_ratio_a":    1.0,
         "chunk":                1024,
         "long_chunk":           1024,
@@ -301,7 +301,7 @@ class DualStreamDataset(torch.utils.data.Dataset):
 
         if mode == "A_only":
             self._index_map = [("A", i) for i in range(n_A)]
-            print(f"  [Phase 1 A_only] {n_A:,} 樣本 — 純蒸餾暖身，Gate 白紙狀態")
+            print(f"  [Phase 1 A_only] {n_A:,} 樣本 — 純蒸餾暖身，波粒糾纏協同蒸餾")
         elif mode == "B_only":
             self._index_map = [("B", i) for i in range(n_B)]
             print(f"  [Phase 2 B_only] {n_B:,} 樣本 — 純長文波動共振，beta={BETA_WAVE_LONG}")
@@ -792,7 +792,7 @@ def main():
 
     print("\n🧬 初始化 16B DNA Helix Ultimate 模型...")
     try:
-        from GEMMA3 import DNAHelix as GEMMA3
+        from GEMMA3 import DNAHelixUltimate as GEMMA3
         base = GEMMA3(
             vocab_size=151936,
             D=4096,
