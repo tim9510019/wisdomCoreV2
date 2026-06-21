@@ -1,7 +1,7 @@
 """
 trainDNA16B_distill.py — DNA Helix Ultimate 16B 蒸餾訓練主程序
 ================================================================
-總計 50B Tokens，分三階段訓練：
+總計 50B Tokens，分雙階段訓練：
 
   Phase 1 ── 1B  ── 純蒸餾暖身
     ・只餵 Data-Type A（≤1024 tok）
@@ -9,13 +9,7 @@ trainDNA16B_distill.py — DNA Helix Ultimate 16B 蒸餾訓練主程序
     ・WPCE 糾纏引擎引導雙鏈交互共振
     ・Loss：CE + KL（α=1.0）+ 負熵平衡門控分配（β=0.5）
 
-  Phase 2 ── 1B  ── 純長文波動共振
-    ・只餵 Data-Type B（32K~128K tok）
-    ・波動頭 Sinc 卷積在長文中獨立建立相位共振模式
-    ・粒子頭 RoPE 在長距自然退化，讓波動頭梯度乾淨主導
-    ・Loss：CE + 強化負熵正則（β=5.0），不做 KL（α=0.0）
-
-  Phase 3 ── 48B ── 雙螺旋混合共生
+  Phase 2 ── 49B ── 雙螺旋混合共生
     ・A:B = 4:1 混合 Batch（每批 80% Type A + 20% Type B）
     ・WPCE 因果糾纏正式啟動：粒子頭引導 Δθ，波動頭 AW 反向修正
     ・Loss：A型 KL（α=1.0）+ B型 負熵（β=5.0）動態切換
@@ -101,25 +95,8 @@ PHASE_CONFIGS = {
         "hf_threshold":         4.0,
     },
     2: {
-        "name":                 "純長文波動共振",
-        "target_tokens":        1_000_000_000,
-        "dataset_mode":         "B_only",
-        "learning_rate":        5e-5,
-        "warmup_steps":         200,
-        "alpha_distill":        0.0,
-        "beta_wave_long":       5.0,
-        "beta_wave_short":      5.0,
-        "gate_entropy_lambda":  0.05,
-        "batch_mix_ratio_a":    0.0,
-        "chunk":                1024,
-        "long_chunk":           32768,
-        "eval_steps":           100,
-        "save_steps":           100,
-        "hf_threshold":         3.5,
-    },
-    3: {
         "name":                 "雙螺旋混合共生",
-        "target_tokens":        48_000_000_000,
+        "target_tokens":        49_000_000_000,
         "dataset_mode":         "mixed",
         "learning_rate":        3e-5,
         "warmup_steps":         1000,
@@ -139,7 +116,7 @@ PHASE_CONFIGS = {
 # ── 運行時從命令行指定當前 Phase ──
 import argparse as _argparse
 _parser = _argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--phase", type=int, default=1, choices=[1, 2, 3])
+_parser.add_argument("--phase", type=int, default=1, choices=[1, 2])
 _args, _ = _parser.parse_known_args()
 PHASE = _args.phase
 

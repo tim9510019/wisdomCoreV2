@@ -6,15 +6,13 @@
 #   Step 1: 數據打包 (Type A + Type B Parquet)
 #   Step 2: CoT 思考鏈數據生成 (Qwen3-Coder-30B enable_thinking)
 #   Step 3: Teacher 推論 → Top-128 Logit Shards (100份)
-#   Step 4: Phase 1 —  1B 純蒸餾暖身    (只餵 Type A, α=1.0, β=0.1)
-#   Step 5: Phase 2 —  1B 純長文波動共振 (只餵 Type B, α=0.0, β=5.0)
-#   Step 6: Phase 3 — 48B 雙螺旋混合共生 (A:B=4:1, α=1.0, β動態)
+#   Step 4: Phase 1 —  1B 純蒸餾暖身    (只餵 Type A, α=1.0, β=0.5)
+#   Step 5: Phase 2 — 49B 雙螺旋混合共生 (A:B=4:1, α=1.0, β動態)
 #
 # 使用方式：
 #   sbatch run_task06_pipeline.slurm        # 全部跑
 #   bash   run_task06_pipeline.slurm step4  # 只跑 Phase 1
 #   bash   run_task06_pipeline.slurm step5  # 只跑 Phase 2
-#   bash   run_task06_pipeline.slurm step6  # 只跑 Phase 3
 
 #SBATCH --job-name=dna16b_distill
 #SBATCH --nodes=1
@@ -90,14 +88,14 @@ fi
 # ================================================================
 # Step 4: Phase 1 —— 1B 純蒸餾暖身
 #   - 只餵 Data-Type A (≤1024 tok)
-#   - 粒子頭從 Qwen3-Coder Soft Labels 建立語法幾何基礎
-#   - Gate 處於白紙狀態，α=1.0，β=0.1（波動頭幾乎不激活）
+#   - 波動頭與粒子頭在糾纏架構下協同蒸餾，共同學習 Qwen3-Coder Soft Labels
+#   - α=1.0，β=0.5
 # ================================================================
 if [ "${STEP}" = "step4" ] || [ "${STEP}" = "all" ]; then
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║  Step 4: Phase 1 — 1B 純蒸餾暖身             ║"
-    echo "║  只餵 Type A | α=1.0 | β=0.1 | A_only mode  ║"
+    echo "║  只餵 Type A | α=1.0 | β=0.5 | A_only mode  ║"
     echo "╚══════════════════════════════════════════════╝"
 
     python "${TASK_DIR}/trainDNA16B_distill.py" --phase 1
@@ -106,41 +104,22 @@ if [ "${STEP}" = "step4" ] || [ "${STEP}" = "all" ]; then
 fi
 
 # ================================================================
-# Step 5: Phase 2 —— 1B 純長文波動共振
-#   - 只餵 Data-Type B (32K~128K tok)
-#   - 波動頭 Sinc 卷積獨立建立相位共振模式
-#   - 粒子頭 RoPE 在長距自然退化，梯度乾淨讓波動頭主導
-#   - α=0.0（不做KL），β=5.0（強力激活波動流）
-# ================================================================
-if [ "${STEP}" = "step5" ] || [ "${STEP}" = "all" ]; then
-    echo ""
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║  Step 5: Phase 2 — 1B 純長文波動共振          ║"
-    echo "║  只餵 Type B | α=0.0 | β=5.0 | B_only mode  ║"
-    echo "╚══════════════════════════════════════════════╝"
-
-    python "${TASK_DIR}/trainDNA16B_distill.py" --phase 2
-
-    echo "✅ Step 5 (Phase 2 純長文波動共振) 完成！"
-fi
-
-# ================================================================
-# Step 6: Phase 3 —— 48B 雙螺旋混合共生
+# Step 5: Phase 2 —— 49B 雙螺旋混合共生
 #   - A:B = 4:1 混合 Batch（每批 80% Type A + 20% Type B）
 #   - WPCE 因果糾纏正式啟動：粒子頭 AP_Base 引導 Δθ
 #   - 波動頭 AW 作為引力透鏡反向修正粒子頭注意力
 #   - A型 α=1.0 KL | B型 β=5.0 負熵 | 動態切換
 # ================================================================
-if [ "${STEP}" = "step6" ] || [ "${STEP}" = "all" ]; then
+if [ "${STEP}" = "step5" ] || [ "${STEP}" = "all" ]; then
     echo ""
     echo "╔══════════════════════════════════════════════════════╗"
-    echo "║  Step 6: Phase 3 — 48B 雙螺旋混合共生                ║"
+    echo "║  Step 5: Phase 2 — 49B 雙螺旋混合共生                ║"
     echo "║  A:B=4:1 | A型 α=1.0 | B型 β=5.0 | mixed mode      ║"
     echo "╚══════════════════════════════════════════════════════╝"
 
-    python "${TASK_DIR}/trainDNA16B_distill.py" --phase 3
+    python "${TASK_DIR}/trainDNA16B_distill.py" --phase 2
 
-    echo "✅ Step 6 (Phase 3 雙螺旋混合共生) 完成！"
+    echo "✅ Step 5 (Phase 2 雙螺旋混合共生) 完成！"
 fi
 
 # ================================================================
@@ -151,8 +130,7 @@ echo "╔═══════════════════════�
 echo "║  🧬 Task06 DNA Helix 16B Coder 蒸餾流水線全部完成！        ║"
 echo "║                                                          ║"
 echo "║  Phase 1:  1B 純蒸餾暖身  ✅                              ║"
-echo "║  Phase 2:  1B 純長文共振  ✅                              ║"
-echo "║  Phase 3: 48B 雙螺旋共生  ✅                              ║"
+echo "║  Phase 2: 49B 雙螺旋共生  ✅                              ║"
 echo "║  Total  : 50B Tokens      ✅                              ║"
 echo "║                                                          ║"
 echo "║  模型保存位置：${CKPT_DIR}                                  ║"
