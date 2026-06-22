@@ -53,11 +53,14 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=1024, temperature
             
         token_id = next_token.item()
         
-        # 檢查是否為結束符號
-        if token_id == tokenizer.eos_token_id:
+        # 檢查是否為結束符號或 Padding 符號
+        if token_id == tokenizer.eos_token_id or (tokenizer.pad_token_id is not None and token_id == tokenizer.pad_token_id):
             break
             
         token_str = tokenizer.decode([token_id], skip_special_tokens=False)
+        if "<|endoftext|>" in token_str or "endoftext" in token_str:
+            break
+            
         generated_text += token_str
         
         # 實時文字渲染控制：偵測思考區段並以灰色標示
@@ -79,7 +82,7 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=1024, temperature
         input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=-1)
         
         # 安全防護：如果模型解碼出結束標籤，主動退出
-        if "<|im_end|>" in generated_text[-15:]:
+        if "<|im_end|>" in generated_text[-15:] or "<|endoftext|>" in generated_text[-15:]:
             break
             
     print("\n" + "-"*80)
