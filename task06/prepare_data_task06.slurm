@@ -2,7 +2,7 @@
 # prepare_data_task06.slurm — Task06 蒸餾訓練資料完整準備腳本（修正版）
 # ================================================================
 # 完成後產出物：
-#   ~/task06_data/type_A/                    ── Type A Parquet (≤1024 tok)
+#   ~/task06_data/type_A/                    ── Type A Parquet (≤2048 tok)
 #   ~/task06_data/type_B/                    ── Type B Parquet (32K~128K tok)
 #   ~/task06_data/logit_shards_qwen3_coder_30b/ ── 100份 Top-128 Logit Shards
 #   ~/task06_data/train_type_A_combined.parquet  ── 永久保留，供換 Teacher 重用
@@ -135,7 +135,7 @@ print(m.num_rows)
             --shard_count    100                  \
             --top_k          128                  \
             --batch_size     32                   \
-            --max_length     1024                 \
+            --max_length     2048                 \
             --shard_start    "${RESUME_SHARD}"    \
             --shard_end      "${SHARD_MID}"       \
             --skip_update_parquet \
@@ -150,7 +150,7 @@ print(m.num_rows)
             --shard_count    100                  \
             --top_k          128                  \
             --batch_size     32                   \
-            --max_length     1024                 \
+            --max_length     2048                 \
             --shard_start    "${SHARD_MID}"       \
             --shard_end      100                  \
             --skip_update_parquet \
@@ -214,7 +214,7 @@ fi
 section "Task06 資料準備完成"
 echo ""
 echo "  ├── ${TYPE_A_DIR}/"
-echo "  │       Type A Parquet（蒸餾型，≤1024 tok）"
+echo "  │       Type A Parquet（蒸餾型，≤2048 tok）"
 echo "  ├── ${TYPE_B_DIR}/"
 echo "  │       Type B Parquet（長文型，32K~128K tok）"
 echo "  ├── ${LOGIT_DIR}/"

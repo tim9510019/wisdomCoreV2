@@ -14,7 +14,7 @@ run_teacher_inference.py — Qwen3-Coder-30B Teacher 推論引擎
       --shard_count   100 \\
       --top_k         128 \\
       --batch_size    4   \\
-      --max_length    1024
+      --max_length    2048
 """
 
 import os
@@ -41,7 +41,7 @@ TEACHER_MODEL_ID = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 DEFAULT_TOP_K    = 128
 DEFAULT_BATCH    = 4
 DEFAULT_SHARDS   = 100
-DEFAULT_MAX_LEN  = 1024
+DEFAULT_MAX_LEN  = 2048
 DISTILL_TEMP     = 1.0    # Teacher logits 不做溫度縮放（原始 logits 輸出）
 
 # Qwen3 特殊 Token IDs（用於識別 think 區域）
@@ -207,7 +207,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH,
                         help="推論 Batch Size")
     parser.add_argument("--max_length", type=int, default=DEFAULT_MAX_LEN,
-                        help="最大序列長度（默認 1024）")
+                        help="最大序列長度（默認 2048）")
     parser.add_argument("--shard_start", type=int, default=0,
                         help="開始的 Shard ID")
     parser.add_argument("--shard_end", type=int, default=100,

@@ -23,7 +23,7 @@ import torch.nn.functional as F
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from GEMMA3 import DNAHelix
+from GEMMA3 import DNAHelixUltimate as DNAHelix
 from transformers import AutoTokenizer
 
 TOKENIZER_ID = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
@@ -92,7 +92,7 @@ def main():
         D=4096,
         hidden_dim=16384,
         num_blocks=40,
-        C=1024,
+        C=2048,
         num_heads=32,
         num_kv_heads=8,
         head_dim=128

@@ -265,7 +265,7 @@ def write_batch_to_parquet(
     batch_data: list[dict],
     output_path: str,
     tokenizer,
-    chunk_size: int = 1024,
+    chunk_size: int = 2048,
 ):
     """
     將生成的 CoT 文本分塊並存入 Parquet。
@@ -291,7 +291,6 @@ def write_batch_to_parquet(
         ids, mask = get_think_mask_from_text(text, tokenizer)
 
         # 切割成 chunk_size 大小
-        n_split_ratio = 0.75
         for start in range(0, len(ids) - chunk_size // 2, chunk_size):
             chunk_ids  = ids[start:start + chunk_size]
             chunk_mask = mask[start:start + chunk_size]
@@ -299,7 +298,28 @@ def write_batch_to_parquet(
             if len(chunk_ids) < chunk_size // 4:
                 continue
 
-            n_split = int(len(chunk_ids) * n_split_ratio)
+            # 尋找 assistant 標籤或 <think> 標籤作為精確切分點
+            n_split = -1
+            # 1. 尋找 <|im_start|>assistant
+            for i in range(len(chunk_ids) - 2, -1, -1):
+                if chunk_ids[i] == 151644 and chunk_ids[i+1] == 77091: # im_start assistant
+                    if i + 2 < len(chunk_ids) and chunk_ids[i+2] == 198: # newline
+                        n_split = i + 3
+                    else:
+                        n_split = i + 2
+                    break
+                    
+            # 2. 如果沒找到，尋找 <think> 標籤 (151667)
+            if n_split == -1:
+                for i in range(len(chunk_ids) - 1, -1, -1):
+                    if chunk_ids[i] == 151667:
+                        n_split = i
+                        break
+                        
+            # 3. 最終備用：原先的 75% 切分
+            if n_split == -1:
+                n_split = int(len(chunk_ids) * 0.75)
+
             labels  = [-100] * n_split + list(chunk_ids[n_split:])
 
             rows.append({

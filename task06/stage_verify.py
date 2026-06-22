@@ -41,7 +41,7 @@ def main():
     shard_files = glob(f"{args.logit_dir}/*.safetensors")
     shard_size  = sum(os.path.getsize(f) for f in shard_files)
 
-    print(f"\n  Data-Type A（蒸餾型 ≤1024 tok）:")
+    print(f"\n  Data-Type A（蒸餾型 ≤2048 tok）:")
     print(f"    檔案數：{a_files}　Token：{a_tok/1e9:.2f}B / 40.0B　完成率：{100*a_tok/40e9:.1f}%")
 
     print(f"\n  Data-Type B（長文 32K~128K tok）:")

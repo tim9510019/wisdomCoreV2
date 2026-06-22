@@ -88,8 +88,8 @@ PHASE_CONFIGS = {
         "beta_wave_short":      0.5,
         "gate_entropy_lambda":  0.01,
         "batch_mix_ratio_a":    1.0,
-        "chunk":                1024,
-        "long_chunk":           1024,
+        "chunk":                2048,
+        "long_chunk":           2048,
         "eval_steps":           10000,
         "save_steps":           10000,
         "hf_threshold":         4.0,
@@ -105,7 +105,7 @@ PHASE_CONFIGS = {
         "beta_wave_short":      1.0,
         "gate_entropy_lambda":  0.01,
         "batch_mix_ratio_a":    0.80,
-        "chunk":                1024,
+        "chunk":                2048,
         "long_chunk":           32768,
         "eval_steps":           500,
         "save_steps":           500,
@@ -142,7 +142,7 @@ SAVE_TOTAL_LIMIT      = 2
 LOGGING_STEPS         = 1
 BATCH_SIZE_PER_DEVICE = 1
 GRAD_ACCUMULATION_STEPS = 8
-CHUNK_SIZE_EVAL       = 1024
+CHUNK_SIZE_EVAL       = 2048
 DISTILL_TEMPERATURE   = 1.5
 THINK_KL_WEIGHT       = 1.5
 TOP_K_LOGITS          = 128

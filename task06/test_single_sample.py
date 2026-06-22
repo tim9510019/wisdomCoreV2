@@ -57,7 +57,7 @@ def main():
     model = DNAHelixUltimate(
         vocab_size=151936,
         D=4096,
-        C=1024,
+        C=2048,
         hidden_dim=16384,
         num_blocks=40,
     )

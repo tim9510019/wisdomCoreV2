@@ -13,7 +13,7 @@ pack_distill_dataset.py — 蒸餾數據集打包工具
       --config   dataset_config.json \\
       --output   /data/train_packed/ \\
       --tokenizer Qwen/Qwen3-Coder-30B \\
-      --max_len_A 1024 \\
+      --max_len_A 2048 \\
       --max_len_B 32768
 """
 
@@ -127,7 +127,7 @@ DEFAULT_CONFIG = {
             "text_column": "content",
             "category": "code",
             "target_tokens": 3_000_000_000,
-            "max_token_filter": 1024,
+            "max_token_filter": 2048,
             "difficulty": 2,
         },
         {
@@ -331,7 +331,7 @@ def main():
                         help="輸出目錄")
     parser.add_argument("--tokenizer", type=str, default="Qwen/Qwen3-Coder-30B-A3B-Instruct",
                         help="Tokenizer 路徑")
-    parser.add_argument("--max_len_A", type=int, default=1024,
+    parser.add_argument("--max_len_A", type=int, default=2048,
                         help="Data-Type A 最大 Token 長度")
     parser.add_argument("--max_len_B", type=int, default=32768,
                         help="Data-Type B 最大 Token 長度")
@@ -359,7 +359,7 @@ def main():
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # ─── 處理 Data-Type A ───
-    print("\n📦 處理 Data-Type A（蒸餾型，≤ 1024 Token）...")
+    print("\n📦 處理 Data-Type A（蒸餾型，≤ 2048 Token）...")
     total_A_tokens = 0
     type_A_writers = {}
 

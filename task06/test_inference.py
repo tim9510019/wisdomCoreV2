@@ -14,7 +14,7 @@ def print_header(title):
     print("="*80 + "\n")
 
 @torch.no_grad()
-def generate_response(model, tokenizer, prompt, max_new_tokens=1024, temperature=0.7, top_p=0.9):
+def generate_response(model, tokenizer, prompt, max_new_tokens=2048, temperature=0.7, top_p=0.9):
     # 使用 Qwen 標準 Chat Template 格式化輸入
     messages = [
         {"role": "user", "content": prompt}
@@ -114,7 +114,7 @@ def main():
     model = DNAHelixUltimate(
         vocab_size=151936,
         D=4096,
-        C=1024,
+        C=2048,
         hidden_dim=16384,
         num_blocks=40,
     )

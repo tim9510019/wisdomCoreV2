@@ -58,7 +58,29 @@ def chunk_ids(ids, chunk_size, category, difficulty):
         chunk = ids[start: start + chunk_size]
         if len(chunk) < chunk_size // 4:
             continue
-        n_split = int(len(chunk) * 0.75)
+            
+        # 尋找 assistant 標籤或 <think> 標籤作為精確切分點
+        n_split = -1
+        # 1. 尋找 <|im_start|>assistant
+        for i in range(len(chunk) - 2, -1, -1):
+            if chunk[i] == 151644 and chunk[i+1] == 77091: # im_start assistant
+                if i + 2 < len(chunk) and chunk[i+2] == 198: # newline
+                    n_split = i + 3
+                else:
+                    n_split = i + 2
+                break
+                
+        # 2. 如果沒找到，尋找 <think> 標籤 (151667)
+        if n_split == -1:
+            for i in range(len(chunk) - 1, -1, -1):
+                if chunk[i] == 151667:
+                    n_split = i
+                    break
+                    
+        # 3. 最終備用：原先的 75% 切分
+        if n_split == -1:
+            n_split = int(len(chunk) * 0.75)
+            
         rows.append({
             "input_ids":      list(chunk),
             "labels":         [-100] * n_split + list(chunk[n_split:]),
@@ -129,7 +151,7 @@ def step_1a_stack_short(tokenizer, type_a_dir, target_tokens=3_000_000_000):
     """1A: Codeparrot Github Code Clean 短文代碼 (≤ 4096 tok) → Type A"""
     print("\n[1A] Codeparrot Github Code Clean 短文代碼...")
     schema   = get_schema_A()
-    CHUNK    = 1024
+    CHUNK    = 2048
     LANGS    = {"python", "javascript", "typescript", "go", "rust", "c++"}
     # Mapping to standard tags
     LANG_MAP = {
@@ -213,7 +235,7 @@ def step_1b_competitive(tokenizer, type_a_dir, target_tokens=3_000_000_000):
     """1B: 競程題 + 推理數據 → Type A"""
     print("\n[1B] 競程題 + 推理數據...")
     schema   = get_schema_A()
-    CHUNK    = 1024
+    CHUNK    = 2048
     total    = 0
     rows     = []
     batch_id = 0
@@ -255,7 +277,7 @@ def step_1c_instruction(tokenizer, type_a_dir, target_tokens=4_000_000_000):
     """1C: 多輪指令對話 → Type A"""
     print("\n[1C] 多輪指令數據...")
     schema   = get_schema_A()
-    CHUNK    = 1024
+    CHUNK    = 2048
     total    = 0
     rows     = []
     batch_id = 0
