@@ -475,6 +475,11 @@ def main():
     parser.add_argument("--tokenizer",   default="Qwen/Qwen3-Coder-30B-A3B-Instruct")
     parser.add_argument("--steps",       default="1a,1b,1c,1d,1e",
                         help="逗號分隔要執行的子步驟，例如 1a,1b 或 all")
+    parser.add_argument("--target_tokens_1a", type=int, default=3_000_000_000)
+    parser.add_argument("--target_tokens_1b", type=int, default=3_000_000_000)
+    parser.add_argument("--target_tokens_1c", type=int, default=4_000_000_000)
+    parser.add_argument("--target_tokens_1d", type=int, default=5_000_000_000)
+    parser.add_argument("--target_tokens_1e", type=int, default=4_000_000_000)
     args = parser.parse_args()
 
     steps = set(args.steps.lower().split(",")) if args.steps != "all" else {"1a","1b","1c","1d","1e"}
@@ -485,11 +490,11 @@ def main():
     print(f"  詞表大小：{tokenizer.vocab_size:,}")
 
     totals = {}
-    if "1a" in steps: totals["1a"] = step_1a_stack_short(tokenizer, args.type_a_dir)
-    if "1b" in steps: totals["1b"] = step_1b_competitive(tokenizer, args.type_a_dir)
-    if "1c" in steps: totals["1c"] = step_1c_instruction(tokenizer, args.type_a_dir)
-    if "1d" in steps: totals["1d"] = step_1d_code_long(tokenizer, args.type_b_dir)
-    if "1e" in steps: totals["1e"] = step_1e_theory(tokenizer, args.type_b_dir)
+    if "1a" in steps: totals["1a"] = step_1a_stack_short(tokenizer, args.type_a_dir, target_tokens=args.target_tokens_1a)
+    if "1b" in steps: totals["1b"] = step_1b_competitive(tokenizer, args.type_a_dir, target_tokens=args.target_tokens_1b)
+    if "1c" in steps: totals["1c"] = step_1c_instruction(tokenizer, args.type_a_dir, target_tokens=args.target_tokens_1c)
+    if "1d" in steps: totals["1d"] = step_1d_code_long(tokenizer, args.type_b_dir, target_tokens=args.target_tokens_1d)
+    if "1e" in steps: totals["1e"] = step_1e_theory(tokenizer, args.type_b_dir, target_tokens=args.target_tokens_1e)
 
     print("\n" + "="*60)
     print("  📊 Stage 1 完成統計")
