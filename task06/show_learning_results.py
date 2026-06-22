@@ -60,6 +60,9 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=64, temperature=0.7):
         
         generated = torch.cat((generated, next_token), dim=1)
         
+        # 清理快取以避免動態序列長度變化造成顯存震盪膨脹
+        torch.cuda.empty_cache()
+
         if next_token.item() == tokenizer.eos_token_id:
             break
             

@@ -81,6 +81,9 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=2048, temperature
         # 將生成的 token 串接到輸入序列中
         input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=-1)
         
+        # 清理快取以避免動態序列長度變化造成顯存震盪膨脹
+        torch.cuda.empty_cache()
+
         # 安全防護：如果模型解碼出結束標籤，主動退出
         if "<|im_end|>" in generated_text[-15:] or "<|endoftext|>" in generated_text[-15:]:
             break

@@ -104,6 +104,8 @@ def main():
             if next_token == tokenizer.eos_token_id or next_token == 151643: # eos or pad
                 break
             input_ids = torch.cat([input_ids, torch.tensor([[next_token]], dtype=torch.long).cuda()], dim=-1)
+            # 清理快取以避免動態序列長度變化造成顯存震盪膨脹
+            torch.cuda.empty_cache()
             
     print("\n\n" + "-"*40)
 
@@ -166,6 +168,8 @@ def main():
             if next_token == tokenizer.eos_token_id or next_token == 151643:
                 break
             input_ids = torch.cat([input_ids, torch.tensor([[next_token]], dtype=torch.long).cuda()], dim=-1)
+            # 清理快取以避免動態序列長度變化造成顯存震盪膨脹
+            torch.cuda.empty_cache()
             
     print("\n\n" + "="*80)
 
