@@ -189,14 +189,15 @@ def sparse_kl_divergence(
 
     if think_mask is not None:
         # Align think_mask shape dynamically to match kl_per_token
-        # kl_per_token shape is (B, L)
+        # kl_per_token shape is (B, L_kl)
         # think_mask shape can be (B, L_mask)
+        L_kl = kl_per_token.size(1)
         if think_mask.shape != kl_per_token.shape:
-            # Slice or pad with False to match L
-            if think_mask.size(1) > L:
-                t_mask = think_mask[:, :L]
+            # Slice or pad with False to match L_kl
+            if think_mask.size(1) > L_kl:
+                t_mask = think_mask[:, :L_kl]
             else:
-                pad_len = L - think_mask.size(1)
+                pad_len = L_kl - think_mask.size(1)
                 t_mask = torch.cat([think_mask, torch.zeros((B, pad_len), dtype=torch.bool, device=think_mask.device)], dim=1)
         else:
             t_mask = think_mask
