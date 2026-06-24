@@ -62,12 +62,13 @@ set_seed(RANDOM_SEED)
 # ============================================================
 
 # ── 路徑配置 ──
-DATASET_DIR_A   = os.path.expanduser("~/task06_data/type_A/")      # Data-Type A Parquet
-DATASET_DIR_B   = os.path.expanduser("~/task06_data/type_B/")      # Data-Type B Parquet
-LOGIT_SHARD_DIR = os.path.expanduser("~/task06_data/logit_shards/")# Teacher Logit Shards
-SAVE_DIR        = os.path.expanduser("~/task06_checkpoints/")
-LOG_PATH        = os.path.expanduser("~/task06_distill_log.csv")
-TOKENIZER_ID    = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+DATASET_DIR_A     = os.path.expanduser("~/task06_data/type_A/")       # Data-Type A Parquet
+DATASET_DIR_B     = os.path.expanduser("~/task06_data/type_B/")       # Data-Type B Parquet（長文純自回歸）
+DATASET_DIR_B_COT = os.path.expanduser("~/task06_data/type_B_cot/")   # Data-Type B-CoT Parquet（Teacher THINK 摘要）
+LOGIT_SHARD_DIR   = os.path.expanduser("~/task06_data/logit_shards/") # Teacher Logit Shards
+SAVE_DIR          = os.path.expanduser("~/task06_checkpoints/")
+LOG_PATH          = os.path.expanduser("~/task06_distill_log.csv")
+TOKENIZER_ID      = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 
 # ── HuggingFace 上傳 ──
 REPO_ID              = "tim9510019/DNA-Helix-16B-Coder"
@@ -104,7 +105,8 @@ PHASE_CONFIGS = {
         "beta_wave_long":       5.0,
         "beta_wave_short":      1.0,
         "gate_entropy_lambda":  0.01,
-        "batch_mix_ratio_a":    0.80,
+        "batch_mix_ratio_a":    0.72,   # A:B:B_COT = 72:20:8
+        "batch_mix_ratio_bcot": 0.08,   # B-CoT 佔 8%（獨立控制）
         "chunk":                2048,
         "long_chunk":           32768,
         "eval_steps":           500,
@@ -121,21 +123,22 @@ _args, _ = _parser.parse_known_args()
 PHASE = _args.phase
 
 # ── 根據 PHASE 載入對應超參數 ──
-_cfg                 = PHASE_CONFIGS[PHASE]
-DATASET_MODE         = _cfg["dataset_mode"]
-TARGET_TOKENS        = _cfg["target_tokens"]
-LEARNING_RATE        = _cfg["learning_rate"]
-WARMUP_STEPS         = _cfg["warmup_steps"]
-ALPHA_DISTILL        = _cfg["alpha_distill"]
-BETA_WAVE_LONG       = _cfg["beta_wave_long"]
-BETA_WAVE_SHORT      = _cfg["beta_wave_short"]
-GATE_ENTROPY_LAMBDA  = _cfg["gate_entropy_lambda"]
-BATCH_MIX_RATIO_A    = _cfg["batch_mix_ratio_a"]
-CHUNK                = _cfg["chunk"]
-LONG_CHUNK           = _cfg["long_chunk"]
-EVAL_STEPS           = _cfg["eval_steps"]
-SAVE_STEPS           = _cfg["save_steps"]
-HF_CE_LOSS_THRESHOLD = _cfg["hf_threshold"]
+_cfg                  = PHASE_CONFIGS[PHASE]
+DATASET_MODE          = _cfg["dataset_mode"]
+TARGET_TOKENS         = _cfg["target_tokens"]
+LEARNING_RATE         = _cfg["learning_rate"]
+WARMUP_STEPS          = _cfg["warmup_steps"]
+ALPHA_DISTILL         = _cfg["alpha_distill"]
+BETA_WAVE_LONG        = _cfg["beta_wave_long"]
+BETA_WAVE_SHORT       = _cfg["beta_wave_short"]
+GATE_ENTROPY_LAMBDA   = _cfg["gate_entropy_lambda"]
+BATCH_MIX_RATIO_A     = _cfg["batch_mix_ratio_a"]
+BATCH_MIX_RATIO_B_COT = _cfg.get("batch_mix_ratio_bcot", 0.0)
+CHUNK                 = _cfg["chunk"]
+LONG_CHUNK            = _cfg["long_chunk"]
+EVAL_STEPS            = _cfg["eval_steps"]
+SAVE_STEPS            = _cfg["save_steps"]
+HF_CE_LOSS_THRESHOLD  = _cfg["hf_threshold"]
 
 # ── 固定超參數 ──
 SAVE_TOTAL_LIMIT      = 2
@@ -273,22 +276,35 @@ class LogitShardCache:
 # ============================================================
 
 class DualStreamDataset(torch.utils.data.Dataset):
+    """
+    三流混合 Dataset：Type A / Type B / Type B-CoT
+
+    混合比例（Phase 2）：A 72% : B 20% : B-CoT 8%
+    ─────────────────────────────────────────────────────────
+    Type A     │ KL 蒸餾 + CE（後25%）│ think 段 KL×1.5
+    Type B     │ CE 全部自回歸        │ 無 KL（無 Logit Shard）
+    Type B-CoT │ CE body 部分         │ 無 KL，THINK 段 mask=-100
+    """
     def __init__(
         self,
         ds_A,
         ds_B,
+        ds_B_cot=None,
         mode: str = DATASET_MODE,
         ratio_A: float = BATCH_MIX_RATIO_A,
+        ratio_B_cot: float = BATCH_MIX_RATIO_B_COT,
         seed: int = RANDOM_SEED,
     ):
-        self.ds_A = ds_A
-        self.ds_B = ds_B
-        self.mode = mode
-        self.rng  = random.Random(seed)
+        self.ds_A     = ds_A
+        self.ds_B     = ds_B
+        self.ds_B_cot = ds_B_cot
+        self.mode     = mode
+        self.rng      = random.Random(seed)
         self._index_map = []
 
-        n_A = len(ds_A) if ds_A is not None else 0
-        n_B = len(ds_B) if ds_B is not None else 0
+        n_A     = len(ds_A)     if ds_A     is not None else 0
+        n_B     = len(ds_B)     if ds_B     is not None else 0
+        n_B_cot = len(ds_B_cot) if ds_B_cot is not None else 0
 
         if mode == "A_only":
             self._index_map = [("A", i) for i in range(n_A)]
@@ -297,28 +313,47 @@ class DualStreamDataset(torch.utils.data.Dataset):
             self._index_map = [("B", i) for i in range(n_B)]
             print(f"  [Phase 2 B_only] {n_B:,} 樣本 — 純長文波動共振，beta={BETA_WAVE_LONG}")
         else:
-            if ratio_A >= 1.0 or n_B == 0:
-                self._index_map = [("A", i) for i in range(n_A)]
+            # A : B : B_COT = ratio_A : (1-ratio_A-ratio_B_cot) : ratio_B_cot
+            ratio_B = max(0.0, 1.0 - ratio_A - ratio_B_cot)
+            total   = n_A + n_B + n_B_cot
+            if total == 0:
+                pass
             else:
-                ab_ratio = ratio_A / (1.0 - ratio_A)
-                ia, ib, a_credit = 0, 0, 0.0
-                while ia < n_A or ib < n_B:
-                    a_credit += ab_ratio
-                    while a_credit >= 1.0 and ia < n_A:
+                # 建立交錯 index_map（按比例插入）
+                ia = ib = ic = 0
+                credit_a = credit_bc = 0.0
+                # 每輪先處理 A，再處理 B，再處理 B-CoT
+                while ia < n_A or ib < n_B or ic < n_B_cot:
+                    # 插入 Type A
+                    credit_a += ratio_A
+                    while credit_a >= (ratio_B + ratio_B_cot) and ia < n_A:
                         self._index_map.append(("A", ia))
                         ia += 1
-                        a_credit -= 1.0
+                        credit_a -= (ratio_B + ratio_B_cot)
+                    # 插入 Type B
                     if ib < n_B:
                         self._index_map.append(("B", ib % n_B))
                         ib += 1
-            print(f"  [Phase 3 mixed] {n_A:,} A + {n_B:,} B = {len(self._index_map):,} 樣本 "
-                  f"(A:{ratio_A:.0%} B:{1-ratio_A:.0%}) — WPCE 雙螺旋共生")
+                    # 插入 Type B-CoT（每隔幾個 B 插入一個）
+                    credit_bc += ratio_B_cot
+                    while credit_bc >= ratio_B and ic < n_B_cot:
+                        self._index_map.append(("B_COT", ic % n_B_cot))
+                        ic += 1
+                        credit_bc -= ratio_B
+
+            actual_a   = sum(1 for t, _ in self._index_map if t == "A")
+            actual_b   = sum(1 for t, _ in self._index_map if t == "B")
+            actual_bc  = sum(1 for t, _ in self._index_map if t == "B_COT")
+            n_tot      = max(len(self._index_map), 1)
+            print(f"  [Phase 2 mixed] {n_tot:,} 樣本 — "
+                  f"A:{actual_a/n_tot:.0%} B:{actual_b/n_tot:.0%} B-CoT:{actual_bc/n_tot:.0%}")
 
     def __len__(self):
         return len(self._index_map)
 
     def __getitem__(self, idx):
         dtype, real_idx = self._index_map[idx]
+
         if dtype == "A":
             item = self.ds_A[real_idx]
             ids  = item["input_ids"]
@@ -332,17 +367,32 @@ class DualStreamDataset(torch.utils.data.Dataset):
                 "think_mask":     torch.tensor(
                     item.get("think_mask", [False] * len(ids)), dtype=torch.bool),
             }
-        else:
+
+        elif dtype == "B":
             item = self.ds_B[real_idx]
             ids  = item["input_ids"][:LONG_CHUNK]
             return {
                 "input_ids":      torch.tensor(ids, dtype=torch.long),
-                "labels":         torch.tensor(ids, dtype=torch.long),
+                "labels":         torch.tensor(ids, dtype=torch.long),  # 全部自回歸
                 "n_split_index":  0,
                 "data_type":      "B",
                 "logit_shard_id": -1,
                 "logit_offset":   -1,
                 "think_mask":     torch.zeros(len(ids), dtype=torch.bool),
+            }
+
+        else:  # B_COT
+            item = self.ds_B_cot[real_idx]
+            ids  = item["input_ids"]
+            return {
+                "input_ids":      torch.tensor(ids, dtype=torch.long),
+                "labels":         torch.tensor(item["labels"], dtype=torch.long),  # THINK 段已是 -100
+                "n_split_index":  item.get("n_split_index", 0),  # THINK 結束位置
+                "data_type":      "B_COT",
+                "logit_shard_id": -1,   # 無 Teacher Logit（不做 KL）
+                "logit_offset":   -1,
+                "think_mask":     torch.tensor(
+                    item.get("think_mask", [False] * len(ids)), dtype=torch.bool),
             }
 
 
@@ -351,34 +401,73 @@ class DualStreamDataset(torch.utils.data.Dataset):
 # ============================================================
 
 class DualStreamCollator:
+    """
+    三流 Collator：處理 Type A / B / B-CoT 的 padding 與 data_type_mask。
+
+    data_type_mask 編碼：
+      0 = Type A  （KL 蒸餾 + CE 後25%）
+      1 = Type B  （CE 全部自回歸）
+      2 = Type B-CoT（CE body 部分，THINK 段 -100，無 KL）
+    """
     def __init__(self, pad_token_id: int):
         self.pad_id = pad_token_id
 
     def __call__(self, features):
-        a_features = [f for f in features if f["data_type"] == "A"]
-        b_features = [f for f in features if f["data_type"] == "B"]
+        a_features  = [f for f in features if f["data_type"] == "A"]
+        b_features  = [f for f in features if f["data_type"] == "B"]
+        bc_features = [f for f in features if f["data_type"] == "B_COT"]
 
-        a_batch = self._pad_batch(a_features) if a_features else None
-        b_batch = self._pad_batch(b_features) if b_features else None
+        a_batch  = self._pad_batch(a_features)  if a_features  else None
+        b_batch  = self._pad_batch(b_features)  if b_features  else None
+        bc_batch = self._pad_batch(bc_features) if bc_features else None
 
-        if a_batch and b_batch:
-            batch = {
-                "input_ids":      torch.cat([a_batch["input_ids"],   b_batch["input_ids"]], dim=0),
-                "labels":         torch.cat([a_batch["labels"],      b_batch["labels"]], dim=0),
-                "n_split_index":  torch.cat([a_batch["n_split_index"], b_batch["n_split_index"]]),
-                "data_type_mask": torch.cat([
-                    torch.zeros(len(a_features), dtype=torch.bool),
-                    torch.ones(len(b_features), dtype=torch.bool),
-                ]),
-                "logit_shard_id": torch.cat([a_batch["logit_shard_id"], b_batch["logit_shard_id"]]),
-                "logit_offset":   torch.cat([a_batch["logit_offset"],   b_batch["logit_offset"]]),
-                "think_mask":     torch.cat([a_batch["think_mask"],     b_batch["think_mask"]], dim=0),
-            }
-        elif a_batch:
-            batch = {**a_batch, "data_type_mask": torch.zeros(len(a_features), dtype=torch.bool)}
-        else:
-            batch = {**b_batch, "data_type_mask": torch.ones(len(b_features), dtype=torch.bool)}
+        # 組合各流，data_type_mask: 0=A, 1=B, 2=B_COT
+        parts_ids, parts_lbl, parts_nsplit = [], [], []
+        parts_sid, parts_off, parts_tmask  = [], [], []
+        parts_dtmask = []
 
+        if a_batch:
+            parts_ids.append(a_batch["input_ids"])
+            parts_lbl.append(a_batch["labels"])
+            parts_nsplit.append(a_batch["n_split_index"])
+            parts_sid.append(a_batch["logit_shard_id"])
+            parts_off.append(a_batch["logit_offset"])
+            parts_tmask.append(a_batch["think_mask"])
+            parts_dtmask.append(torch.zeros(len(a_features), dtype=torch.long))
+
+        if b_batch:
+            parts_ids.append(b_batch["input_ids"])
+            parts_lbl.append(b_batch["labels"])
+            parts_nsplit.append(b_batch["n_split_index"])
+            parts_sid.append(b_batch["logit_shard_id"])
+            parts_off.append(b_batch["logit_offset"])
+            parts_tmask.append(b_batch["think_mask"])
+            parts_dtmask.append(torch.ones(len(b_features), dtype=torch.long))
+
+        if bc_batch:
+            parts_ids.append(bc_batch["input_ids"])
+            parts_lbl.append(bc_batch["labels"])
+            parts_nsplit.append(bc_batch["n_split_index"])
+            parts_sid.append(bc_batch["logit_shard_id"])
+            parts_off.append(bc_batch["logit_offset"])
+            parts_tmask.append(bc_batch["think_mask"])
+            parts_dtmask.append(torch.full((len(bc_features),), 2, dtype=torch.long))
+
+        # Pad 到同一 seq_len（各流可能長度不同）
+        max_len = max(t.size(1) for t in parts_ids)
+        def _pad_seq(t, val):
+            pad = max_len - t.size(1)
+            return torch.cat([t, torch.full((t.size(0), pad), val, dtype=t.dtype)], dim=1) if pad > 0 else t
+
+        batch = {
+            "input_ids":      torch.cat([_pad_seq(t, self.pad_id) for t in parts_ids], dim=0),
+            "labels":         torch.cat([_pad_seq(t, -100)        for t in parts_lbl], dim=0),
+            "n_split_index":  torch.cat(parts_nsplit),
+            "logit_shard_id": torch.cat(parts_sid),
+            "logit_offset":   torch.cat(parts_off),
+            "think_mask":     torch.cat([_pad_seq(t.long(), 0).bool() for t in parts_tmask], dim=0),
+            "data_type_mask": torch.cat(parts_dtmask),  # 0=A, 1=B, 2=B_COT
+        }
         return batch
 
     def _pad_batch(self, features):
@@ -481,9 +570,10 @@ class DNAHelixDistillLM(nn.Module):
 
             B = input_ids.size(0)
             teacher_data = []
+            # KL 蒸餾只對 Type A（data_type_mask == 0）做；B 和 B-CoT 均跳過
             if self.training and self.alpha_distill > 0 and logit_shard_id is not None:
                 for bi in range(B):
-                    is_type_a = (data_type_mask is None) or not data_type_mask[bi].item()
+                    is_type_a = (data_type_mask is None) or (data_type_mask[bi].item() == 0)
                     if is_type_a:
                         s_id = logit_shard_id[bi].item()
                         s_off = logit_offset[bi].item()
@@ -494,7 +584,7 @@ class DNAHelixDistillLM(nn.Module):
                         else:
                             teacher_data.append((bi, None, None))
                     else:
-                        teacher_data.append((bi, None, None))
+                        teacher_data.append((bi, None, None))  # B 和 B-CoT 均不做 KL
             else:
                 for bi in range(B):
                     teacher_data.append((bi, None, None))
@@ -555,11 +645,12 @@ class DNAHelixDistillLM(nn.Module):
                     loss_kl = total_kl_loss / total_kl_tokens
                     alpha = self.alpha_distill
 
+                # beta 選擇：batch 中有長文（B 或 B-CoT）就用 beta_wave_long
                 if data_type_mask is not None:
-                    b_indices = data_type_mask.nonzero(as_tuple=True)[0]
-                    n_B   = len(b_indices)
-                    n_tot = B
-                    beta  = self.beta_wave_long if n_B / max(n_tot, 1) > 0.1 else self.beta_wave_short
+                    # data_type_mask: 0=A, 1=B, 2=B_COT
+                    n_long = (data_type_mask >= 1).sum().item()  # B + B-CoT 數量
+                    n_tot  = B
+                    beta   = self.beta_wave_long if n_long / max(n_tot, 1) > 0.1 else self.beta_wave_short
                 else:
                     beta = self.beta_wave_short
 
@@ -727,18 +818,25 @@ def main():
     combined_a_path = os.path.expanduser("~/task06_data/train_type_A_combined.parquet")
     if os.path.exists(combined_a_path):
         a_files = [combined_a_path]
-        print(f"   [INFO] Found combined Type A Parquet: {combined_a_path}, loading it directly.")
+        print(f"   [INFO] Found combined Type A Parquet: {combined_a_path}")
     else:
         a_files = sorted(glob(os.path.join(DATASET_DIR_A, "*.parquet")))
-    b_files = sorted(glob(os.path.join(DATASET_DIR_B, "*.parquet")))
+    b_files    = sorted(glob(os.path.join(DATASET_DIR_B,     "*.parquet")))
+    b_cot_files = sorted(glob(os.path.join(DATASET_DIR_B_COT, "*.parquet")))
 
     if not a_files:
         raise FileNotFoundError(f"找不到 Data-Type A Parquet 文件：{DATASET_DIR_A}")
     if not b_files:
         raise FileNotFoundError(f"找不到 Data-Type B Parquet 文件：{DATASET_DIR_B}")
 
-    ds_A_raw = load_dataset("parquet", data_files={"train": a_files}, split="train")
-    ds_B_raw = load_dataset("parquet", data_files={"train": b_files}, split="train")
+    ds_A_raw   = load_dataset("parquet", data_files={"train": a_files},     split="train")
+    ds_B_raw   = load_dataset("parquet", data_files={"train": b_files},     split="train")
+    ds_B_cot_raw = None
+    if b_cot_files:
+        ds_B_cot_raw = load_dataset("parquet", data_files={"train": b_cot_files}, split="train")
+        print(f"   [INFO] Type B-CoT: {len(ds_B_cot_raw):,} 樣本 ({len(b_cot_files)} 個 Parquet)")
+    else:
+        print(f"   [WARN] 找不到 Type B-CoT Parquet（{DATASET_DIR_B_COT}），B-CoT 流將跳過")
 
     import glob as glob_module
     available_shards = []
@@ -750,31 +848,32 @@ def main():
                 available_shards.append(shard_id)
             except Exception:
                 pass
-    
-    print(f"   [INFO] Found {len(available_shards)} completed logit shards locally: {sorted(available_shards)}")
+
+    print(f"   [INFO] Found {len(available_shards)} completed logit shards: {sorted(available_shards)}")
     if available_shards:
         indices_to_select = []
         samples_per_shard = 67903
         for s_id in available_shards:
             start_idx = s_id * samples_per_shard
-            end_idx = min(start_idx + samples_per_shard, len(ds_A_raw))
+            end_idx   = min(start_idx + samples_per_shard, len(ds_A_raw))
             indices_to_select.extend(range(start_idx, end_idx))
-            
         ds_A_raw = ds_A_raw.select(indices_to_select)
-        print(f"   [INFO] Instantly selected {len(ds_A_raw):,} samples matching available shards.")
+        print(f"   [INFO] Selected {len(ds_A_raw):,} Type A samples matching available shards.")
     else:
         print(f"   [WARN] No local logit shards found in {LOGIT_SHARD_DIR}!")
 
-    ds_A_split = ds_A_raw.train_test_split(test_size=100, seed=RANDOM_SEED)
-    ds_B_split = ds_B_raw.train_test_split(test_size=20,  seed=RANDOM_SEED)
+    ds_A_split     = ds_A_raw.train_test_split(test_size=100, seed=RANDOM_SEED)
+    ds_B_split     = ds_B_raw.train_test_split(test_size=20,  seed=RANDOM_SEED)
+    ds_B_cot_split = ds_B_cot_raw.train_test_split(test_size=20, seed=RANDOM_SEED) \
+                     if ds_B_cot_raw is not None else {"train": None, "test": None}
 
     train_ds = DualStreamDataset(
-        ds_A_split["train"], ds_B_split["train"],
-        ratio_A=BATCH_MIX_RATIO_A
+        ds_A_split["train"], ds_B_split["train"], ds_B_cot_split["train"],
+        ratio_A=BATCH_MIX_RATIO_A, ratio_B_cot=BATCH_MIX_RATIO_B_COT,
     )
     eval_ds = DualStreamDataset(
-        ds_A_split["test"], ds_B_split["test"],
-        ratio_A=BATCH_MIX_RATIO_A
+        ds_A_split["test"], ds_B_split["test"], ds_B_cot_split["test"],
+        ratio_A=BATCH_MIX_RATIO_A, ratio_B_cot=BATCH_MIX_RATIO_B_COT,
     )
 
     print(f"   訓練集：{len(train_ds):,} 樣本 | 驗證集：{len(eval_ds):,} 樣本")
