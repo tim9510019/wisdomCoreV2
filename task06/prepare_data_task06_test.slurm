@@ -3,8 +3,8 @@
 # ================================================================
 # 完成後產出物：
 #   ~/task06_data/type_A/                         ── Type A Parquet (≤2048 tok)
-#   ~/task06_data/type_B/                         ── Type B Parquet (長文)
-#   ~/task06_data/type_B_cot/                     ── Type B-CoT Parquet
+#   ~/task06_data/type_B/                         ── Type B Parquet (長文純自回歸)
+#   ~/task06_data/type_B_cot/                     ── Type B-CoT Parquet（真實 THINK 摘要）
 #   ~/task06_data/logit_shards_qwen3_coder_30b/   ── Top-128 Logit Shards
 #   ~/task06_data/train_type_A_combined.parquet   ── 永久保留，供換 Teacher 重用
 #   ~/task06_data/dataset_stats.json              ── Token 統計報告
@@ -15,17 +15,17 @@
 #   sbatch prepare_data_task06_test.slurm all 50             # 全部準備，限制 50 GB
 #   sbatch prepare_data_task06_test.slurm all 200            # 全部準備，限制 200 GB
 #
-#   bash prepare_data_task06_test.slurm stage1               # 只做 Stage1，預設 100 GB
-#   bash prepare_data_task06_test.slurm stage1 30            # 只做 Stage1，限制 30 GB
-#   bash prepare_data_task06_test.slurm stage2 50            # 只做 Stage2，限制 50 GB
-#   bash prepare_data_task06_test.slurm stage3               # 只做 Stage3（Teacher 推論）
+#   bash prepare_data_task06_test.slurm stage1               # 只做 Stage1（下載打包），預設 100 GB
+#   bash prepare_data_task06_test.slurm stage2 50            # 只做 Stage2（CoT 生成），50 GB
+#   bash prepare_data_task06_test.slurm stage2b 100          # 只做 Stage2b（B-CoT 生成），100 GB
+#   bash prepare_data_task06_test.slurm stage3               # 只做 Stage3（Teacher Logit 推論）
 #   bash prepare_data_task06_test.slurm verify               # 只做最終驗證
 #
-# GB 預算說明：
-#   - 控制 pack_distill_dataset.py 的 Parquet 總量（--max_gb）
-#   - 同時按比例換算 CoT tokens 上限（stage2）
-#   - Logit Shard 容量另計（約等於 Type-A tokens × 128 × 2 bytes）
-#   - 範例：100 GB 預算 → ~24B tokens Parquet + ~100GB Logit Shards
+# GB 預算各 Stage 換算：
+#   Stage1  Parquet   → --max_gb 直接傳入 stage1_download.py
+#   Stage2  CoT       → tokens = MAX_GB × 300,000（100GB→30M）
+#   Stage2b B-CoT     → tokens = MAX_GB × 17,500,000（100GB→1.75B body tokens）
+#   Stage3  Shards    → shard 數 = round(MAX_GB)（每份 ≈ 1 GB）
 
 #SBATCH --job-name=task06_data_prep_test
 #SBATCH --nodes=1
@@ -93,18 +93,25 @@ section() {
 
 # CoT tokens 上限：100 GB → 30,000,000 tokens（測試版比例）
 COT_TARGET_TOKENS=$(echo "${MAX_GB} * 300000" | bc | awk '{printf "%d", $1}')
-# 最小值保護：至少 1,000,000 tokens
 if [ "${COT_TARGET_TOKENS}" -lt 1000000 ]; then
     COT_TARGET_TOKENS=1000000
 fi
 
+# B-CoT body tokens 上限：100 GB → 1,750,000,000 tokens
+# 換算依據：B-CoT 在 153GB 原始規劃中佔 3B tokens，縮放後 = MAX_GB/100 × 1.75B
+BCOT_TARGET_TOKENS=$(echo "${MAX_GB} * 17500000" | bc | awk '{printf "%d", $1}')
+if [ "${BCOT_TARGET_TOKENS}" -lt 5000000 ]; then
+    BCOT_TARGET_TOKENS=5000000
+fi
+
 # 打印配置摘要
 section "Task06 測試資料準備（GB 預算：${MAX_GB} GB）"
-detail "STAGE        = ${STAGE}"
-detail "MAX_GB       = ${MAX_GB} GB"
-detail "COT tokens   = $(echo "scale=1; ${COT_TARGET_TOKENS}/1000000" | bc)M tokens"
-detail "資料根目錄   = ${DATA_ROOT}"
-detail "Teacher 模型 = ${TEACHER_MODEL}"
+detail "STAGE          = ${STAGE}"
+detail "MAX_GB         = ${MAX_GB} GB"
+detail "COT tokens     = $(echo "scale=1; ${COT_TARGET_TOKENS}/1000000" | bc)M tokens"
+detail "B-CoT tokens   = $(echo "scale=1; ${BCOT_TARGET_TOKENS}/1000000" | bc)M body tokens"
+detail "資料根目錄     = ${DATA_ROOT}"
+detail "Teacher 模型   = ${TEACHER_MODEL}"
 echo ""
 
 # ================================================================
@@ -130,7 +137,7 @@ fi
 # STAGE 2: CoT 思考鏈自生成（tokens 上限按 GB 比例換算）
 # ================================================================
 if [ "${STAGE}" = "stage2" ] || [ "${STAGE}" = "all" ]; then
-    section "Stage 2: Qwen3 CoT 生成（目標 ${COT_TARGET_TOKENS} tokens）"
+    section "Stage 2: Qwen3 CoT 生成（目標 $(echo "scale=1; ${COT_TARGET_TOKENS}/1000000" | bc)M tokens）"
     info "開始時間：$(date)"
 
     python3 "${TASK_DIR}/prepare_cot_distill.py" \
@@ -146,6 +153,33 @@ if [ "${STAGE}" = "stage2" ] || [ "${STAGE}" = "all" ]; then
     find "${COT_DIR}" -name "*.parquet" -exec cp {} "${TYPE_A_DIR}/" \;
 
     info "Stage 2 完成：$(date)"
+fi
+
+# ================================================================
+# STAGE 2b: Type B-CoT 真實 THINK 摘要生成
+#   - 從中等長度代碼/文本（512~4096 tokens）出發
+#   - 用 Teacher 生成真實 <think> 摘要（分析代碼功能、邏輯、問題）
+#   - 組合：[<think>真實摘要</think>][原始代碼]
+#   - labels：THINK 段 mask=-100，原始代碼段正常學習
+#   - 確保 THINK 內容與代碼語義強對齊，避免 think-code 脫節
+# ================================================================
+if [ "${STAGE}" = "stage2b" ] || [ "${STAGE}" = "all" ]; then
+    section "Stage 2b: Type B-CoT 生成（目標 $(echo "scale=1; ${BCOT_TARGET_TOKENS}/1000000" | bc)M body tokens）"
+    info "開始時間：$(date)"
+
+    python3 "${TASK_DIR}/prepare_bcot_distill.py" \
+        --teacher_model    "${TEACHER_MODEL}"         \
+        --output_dir       "${TYPE_B_COT_DIR}"        \
+        --target_tokens    "${BCOT_TARGET_TOKENS}"    \
+        --min_body_tokens  512                        \
+        --max_body_tokens  4096                       \
+        --max_think_tokens 768                        \
+        --temperature      0.6                        \
+        --vllm_batch_size  256                        \
+        --seed             2026                       \
+        2>&1 | tee "${LOG_DIR}/stage2b_bcot_test.log"
+
+    info "Stage 2b 完成：$(date)"
 fi
 
 # ================================================================
