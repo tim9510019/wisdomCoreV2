@@ -1,6 +1,11 @@
 """
 stage1_download.py — Stage 1 數據下載主程序
-由 prepare_data_task06.slurm 調用，接受路徑參數
+由 prepare_data_task06.slurm / prepare_data_task06_test.slurm 調用
+
+支援 --max_gb 參數：
+  指定硬碟容量上限後，自動等比縮放各 Step 的 target_tokens，
+  確保全部 Parquet 輸出不超過指定的 GB 數。
+  例如：--max_gb 100  (預設：不限制)
 """
 import os
 import sys
@@ -10,6 +15,63 @@ import pyarrow.parquet as pq
 from transformers import AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
+
+# ============================================================
+# 儲存成本估算（Snappy 壓縮後的有效 bytes/token）
+# Type A：input_ids(4B)+labels(4B)+think_mask(1B)+metadata ≈ 9B → ~4.5B 壓縮
+# Type B：input_ids(4B)+labels(4B)+minimal metadata         ≈ 8B → ~4.0B 壓縮
+# ============================================================
+BYTES_PER_TOKEN_A = 4.5
+BYTES_PER_TOKEN_B = 4.0
+
+
+def auto_scale_tokens(targets: dict, max_gb: float) -> float:
+    """
+    根據 --max_gb 等比縮放各 Step 的 target_tokens。
+
+    Args:
+        targets: dict，key 為 step 名稱（'1a'~'1e'），value 為 token 數（會原地修改）
+        max_gb:  硬碟上限 (GB)
+
+    Returns:
+        scale_factor (float)：實際套用的縮放係數
+    """
+    max_bytes = max_gb * (1024 ** 3)
+
+    # 計算自然總 bytes（1a/1b/1c 為 Type A，1d/1e 為 Type B）
+    natural_bytes = 0.0
+    for step, tok in targets.items():
+        bpt = BYTES_PER_TOKEN_B if step in ('1d', '1e') else BYTES_PER_TOKEN_A
+        natural_bytes += tok * bpt
+
+    scale = min(1.0, max_bytes / natural_bytes) if natural_bytes > 0 else 1.0
+
+    for step in targets:
+        targets[step] = int(targets[step] * scale)
+
+    natural_gb = natural_bytes / (1024 ** 3)
+    scaled_gb  = natural_gb * scale
+    return scale, natural_gb, scaled_gb
+
+
+def print_budget_table(targets: dict, scale: float, natural_gb: float, scaled_gb: float, max_gb: float):
+    """打印儲存預算調配表。"""
+    w = 62
+    print(f"\n{'='*w}")
+    print(f"💾  儲存預算自動調配  (縮放係數 = {scale:.4f})")
+    print(f"    原始規劃：{natural_gb:.1f} GB  →  調配後：{scaled_gb:.1f} GB  (上限 {max_gb} GB)")
+    print(f"{'─'*w}")
+    print(f"  {'Step':<6} {'類型':<8} {'調配後 Tokens':>16}  {'估算 GB':>8}")
+    print(f"{'─'*w}")
+    for step, tok in targets.items():
+        bpt  = BYTES_PER_TOKEN_B if step in ('1d', '1e') else BYTES_PER_TOKEN_A
+        typ  = 'Type-B' if step in ('1d', '1e') else 'Type-A'
+        gb   = tok * bpt / (1024 ** 3)
+        print(f"  {step:<6} {typ:<8} {tok/1e9:>14.3f}B  {gb:>8.2f}")
+    print(f"{'─'*w}")
+    print(f"  {'Total':<6} {'':<8} {sum(targets.values())/1e9:>14.3f}B  {scaled_gb:>8.2f}")
+    print(f"  預算使用率：{100*scaled_gb/max_gb:.1f}%")
+    print(f"{'='*w}\n")
 
 def get_schema_A():
     return pa.schema([
@@ -469,7 +531,7 @@ def step_1e_theory(tokenizer, type_b_dir, target_tokens=4_000_000_000):
     return total
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Stage 1 數據下載主程序")
     parser.add_argument("--type_a_dir",  required=True)
     parser.add_argument("--type_b_dir",  required=True)
     parser.add_argument("--tokenizer",   default="Qwen/Qwen3-Coder-30B-A3B-Instruct")
@@ -480,9 +542,35 @@ def main():
     parser.add_argument("--target_tokens_1c", type=int, default=4_000_000_000)
     parser.add_argument("--target_tokens_1d", type=int, default=5_000_000_000)
     parser.add_argument("--target_tokens_1e", type=int, default=4_000_000_000)
+    parser.add_argument("--max_gb",      type=float, default=None,
+                        help=(
+                            "硬碟容量上限（GB）。指定後自動等比縮放各 Step 的 target_tokens，"
+                            "確保輸出 Parquet 總量不超過此值。"
+                            "例如：--max_gb 100"
+                        ))
     args = parser.parse_args()
 
     steps = set(args.steps.lower().split(",")) if args.steps != "all" else {"1a","1b","1c","1d","1e"}
+
+    # ── 儲存預算自動調配 ──
+    # 只對「本次要執行的 steps」計算縮放，跳過的 step 不納入預算
+    targets = {}
+    if "1a" in steps: targets["1a"] = args.target_tokens_1a
+    if "1b" in steps: targets["1b"] = args.target_tokens_1b
+    if "1c" in steps: targets["1c"] = args.target_tokens_1c
+    if "1d" in steps: targets["1d"] = args.target_tokens_1d
+    if "1e" in steps: targets["1e"] = args.target_tokens_1e
+
+    if args.max_gb is not None:
+        scale, natural_gb, scaled_gb = auto_scale_tokens(targets, args.max_gb)
+        print_budget_table(targets, scale, natural_gb, scaled_gb, args.max_gb)
+        if scale < 1.0:
+            print(f"⚠️  原始規劃 {natural_gb:.1f} GB 超出限制 {args.max_gb} GB，"
+                  f"已等比縮放至 {scaled_gb:.1f} GB（係數 {scale:.4f})")
+        else:
+            print(f"✅ 原始規劃 {natural_gb:.1f} GB 在預算 {args.max_gb} GB 以內，無需縮放")
+    else:
+        print("ℹ️  未指定 --max_gb，使用各 Step 的原始 target_tokens（無儲存上限）")
 
     print(f"\n🔤 載入 Tokenizer：{args.tokenizer}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
@@ -490,21 +578,31 @@ def main():
     print(f"  詞表大小：{tokenizer.vocab_size:,}")
 
     totals = {}
-    if "1a" in steps: totals["1a"] = step_1a_stack_short(tokenizer, args.type_a_dir, target_tokens=args.target_tokens_1a)
-    if "1b" in steps: totals["1b"] = step_1b_competitive(tokenizer, args.type_a_dir, target_tokens=args.target_tokens_1b)
-    if "1c" in steps: totals["1c"] = step_1c_instruction(tokenizer, args.type_a_dir, target_tokens=args.target_tokens_1c)
-    if "1d" in steps: totals["1d"] = step_1d_code_long(tokenizer, args.type_b_dir, target_tokens=args.target_tokens_1d)
-    if "1e" in steps: totals["1e"] = step_1e_theory(tokenizer, args.type_b_dir, target_tokens=args.target_tokens_1e)
+    if "1a" in steps: totals["1a"] = step_1a_stack_short(tokenizer, args.type_a_dir, target_tokens=targets.get("1a", args.target_tokens_1a))
+    if "1b" in steps: totals["1b"] = step_1b_competitive(tokenizer, args.type_a_dir, target_tokens=targets.get("1b", args.target_tokens_1b))
+    if "1c" in steps: totals["1c"] = step_1c_instruction(tokenizer, args.type_a_dir, target_tokens=targets.get("1c", args.target_tokens_1c))
+    if "1d" in steps: totals["1d"] = step_1d_code_long(tokenizer, args.type_b_dir,  target_tokens=targets.get("1d", args.target_tokens_1d))
+    if "1e" in steps: totals["1e"] = step_1e_theory(tokenizer, args.type_b_dir,      target_tokens=targets.get("1e", args.target_tokens_1e))
+
+    # ── 完成統計 ──
+    type_a_total = sum(v for k, v in totals.items() if k in ("1a", "1b", "1c"))
+    type_b_total = sum(v for k, v in totals.items() if k in ("1d", "1e"))
+    est_gb_a     = type_a_total * BYTES_PER_TOKEN_A / (1024 ** 3)
+    est_gb_b     = type_b_total * BYTES_PER_TOKEN_B / (1024 ** 3)
+    est_gb_total = est_gb_a + est_gb_b
 
     print("\n" + "="*60)
     print("  📊 Stage 1 完成統計")
     print("="*60)
-    type_a_total = sum(v for k, v in totals.items() if k in ("1a","1b","1c"))
-    type_b_total = sum(v for k, v in totals.items() if k in ("1d","1e"))
     for k, v in totals.items():
-        print(f"  Step {k}: {v/1e9:.2f}B tokens")
-    print(f"\n  Type A 合計：{type_a_total/1e9:.2f}B / 40.0B")
-    print(f"  Type B 合計：{type_b_total/1e9:.2f}B / 10.0B")
+        bpt = BYTES_PER_TOKEN_B if k in ('1d', '1e') else BYTES_PER_TOKEN_A
+        gb  = v * bpt / (1024 ** 3)
+        print(f"  Step {k}: {v/1e9:.3f}B tokens  ≈ {gb:.1f} GB")
+    print(f"\n  Type A 合計：{type_a_total/1e9:.3f}B tokens  ≈ {est_gb_a:.1f} GB")
+    print(f"  Type B 合計：{type_b_total/1e9:.3f}B tokens  ≈ {est_gb_b:.1f} GB")
+    print(f"  總計：       {(type_a_total+type_b_total)/1e9:.3f}B tokens  ≈ {est_gb_total:.1f} GB")
+    if args.max_gb:
+        print(f"  預算上限：   {args.max_gb} GB  (使用率 {100*est_gb_total/args.max_gb:.1f}%)")
     print("="*60)
 
 if __name__ == "__main__":
